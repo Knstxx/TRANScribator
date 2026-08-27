@@ -1,0 +1,51 @@
+services:
+  telegram-bot-api:
+    image: aiogram/telegram-bot-api:latest
+    environment:
+      TELEGRAM_API_ID: "${TELEGRAM_API_ID}"
+      TELEGRAM_API_HASH: "${TELEGRAM_API_HASH}"
+      TELEGRAM_LOCAL: "true"
+    volumes:
+      - tg-data:/var/lib/telegram-bot-api
+    restart: unless-stopped
+
+  transcriber:
+    build: .
+    environment:
+      OPENAI_API_KEY: "${OPENAI_API_KEY}"
+      TELEGRAM_TOKEN: "${TELEGRAM_TOKEN}"
+      TELEGRAM_ALLOWED_USERS: "${TELEGRAM_ALLOWED_USERS}"
+      TELEGRAM_API_URL: "http://telegram-bot-api:8081"
+      TELEGRAM_FALLBACK_CHATS: "${TELEGRAM_FALLBACK_CHATS:-}"
+      INTERNAL_API_TOKEN: "${INTERNAL_API_TOKEN}"
+      DISCORD_CALLBACK_URL: "http://discord-bot:3100/callback"
+      SHARED_DIR: "/shared"
+      HTTP_PORT: "8080"
+      WORKERS: "${WORKERS:-3}"
+    restart: unless-stopped
+    depends_on:
+      - telegram-bot-api
+    volumes:
+      - ./logs:/app/logs
+      - tg-data:/var/lib/telegram-bot-api:ro
+      - shared-audio:/shared
+
+  discord-bot:
+    build: ./recorder
+    environment:
+      DISCORD_TOKEN: "${DISCORD_TOKEN}"
+      DISCORD_CHANNEL_ID: "${DISCORD_CHANNEL_ID}"
+      TRANSCRIBER_URL: "http://transcriber:8080"
+      SHARED_DIR: /shared
+      TELEGRAM_FALLBACK_CHATS: "${TELEGRAM_FALLBACK_CHATS:-}"
+      INTERNAL_API_TOKEN: "${INTERNAL_API_TOKEN}"
+      PORT: "3100"
+    volumes:
+      - shared-audio:/shared
+    restart: unless-stopped
+    depends_on:
+      - transcriber
+
+volumes:
+  tg-data:
+  shared-audio:
