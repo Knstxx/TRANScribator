@@ -2,8 +2,12 @@ import Foundation
 import Security
 
 public struct KeychainStore: Sendable {
+    private static let currentService = "app.transcribator.mac"
+    private static let legacyService = "com.knst.transcribator.mac"
+
     private let service: String
     private let account: String
+    private let fallbackServices: [String]
 
     public init(
         service: String = "app.transcribator.mac",
@@ -11,9 +15,18 @@ public struct KeychainStore: Sendable {
     ) {
         self.service = service
         self.account = account
+        fallbackServices = service == Self.currentService ? [Self.legacyService] : []
     }
 
     public func read() throws -> String? {
+        if let value = try read(service: service) { return value }
+        for fallbackService in fallbackServices {
+            if let value = try read(service: fallbackService) { return value }
+        }
+        return nil
+    }
+
+    private func read(service: String) throws -> String? {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
@@ -33,6 +46,14 @@ public struct KeychainStore: Sendable {
     }
 
     public func containsValue() throws -> Bool {
+        if try containsValue(service: service) { return true }
+        for fallbackService in fallbackServices where try containsValue(service: fallbackService) {
+            return true
+        }
+        return false
+    }
+
+    private func containsValue(service: String) throws -> Bool {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
@@ -75,6 +96,13 @@ public struct KeychainStore: Sendable {
     }
 
     public func delete() throws {
+        try delete(service: service)
+        for fallbackService in fallbackServices {
+            try delete(service: fallbackService)
+        }
+    }
+
+    private func delete(service: String) throws {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,

@@ -41,7 +41,7 @@ struct SettingsView: View {
 
                 Toggle("Копировать готовую транскрипцию", isOn: $state.copiesTranscriptToClipboard)
 
-                Picker("Качество аудио", selection: $state.selectedAudioQuality) {
+                Picker("Качество записи и файлов", selection: $state.selectedAudioQuality) {
                     ForEach(AudioQuality.allCases) { quality in
                         Text(quality.title).tag(quality)
                     }

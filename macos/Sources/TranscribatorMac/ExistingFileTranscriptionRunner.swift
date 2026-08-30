@@ -50,9 +50,6 @@ enum ExistingFileTranscriptionRunner {
         ), !isDirectory.boolValue else {
             throw RecoveryError.inputMissing(request.inputURL.path)
         }
-        guard request.inputURL.pathExtension.lowercased() == "m4a" else {
-            throw RecoveryError.unsupportedInput
-        }
         guard !FileManager.default.fileExists(atPath: request.outputURL.path) else {
             throw RecoveryError.outputExists(request.outputURL.path)
         }
@@ -69,35 +66,46 @@ enum ExistingFileTranscriptionRunner {
         )
         defer { try? FileManager.default.removeItem(at: sessionDirectory) }
 
-        let workingRecordingURL = sessionDirectory.appendingPathComponent("recording.m4a")
-        try FileManager.default.copyItem(at: request.inputURL, to: workingRecordingURL)
-        let uploadFiles = try await AudioChunker().uploadFiles(for: workingRecordingURL)
+        let workingRecordingURL = sessionDirectory.appendingPathComponent("prepared.m4a")
+        try await MediaFilePreparer().prepare(
+            sourceURL: request.inputURL,
+            destinationURL: workingRecordingURL,
+            quality: .standard
+        )
         let client = OpenAITranscriptionClient(apiKey: apiKey)
-
-        var results: [String] = []
-        for (index, fileURL) in uploadFiles.enumerated() {
+        let transcript = try await AudioTranscriptionPipeline().transcribe(
+            audioURL: workingRecordingURL,
+            model: request.model,
+            client: client
+        ) { progress in
+            guard case .transcribing(let index, let count) = progress else { return }
             FileHandle.standardError.write(
-                Data("Транскрибирование \(index + 1) из \(uploadFiles.count)…\n".utf8)
+                Data("Транскрибирование \(index) из \(count)…\n".utf8)
             )
-            let prompt = request.model == .diarize ? nil : results.last
-            let text = try await client.transcribe(
-                fileURL: fileURL,
-                model: request.model,
-                prompt: prompt
-            )
-            if !text.isEmpty { results.append(text) }
         }
-
-        let transcript = results.joined(separator: "\n\n")
-        guard !transcript.isEmpty else { throw RecoveryError.emptyTranscript }
         try FileManager.default.createDirectory(
             at: request.outputURL.deletingLastPathComponent(),
             withIntermediateDirectories: true
         )
-        try Data(transcript.utf8).write(
-            to: request.outputURL,
-            options: [.atomic, .withoutOverwriting]
+        try writeTranscriptAtomicallyWithoutOverwriting(
+            transcript,
+            to: request.outputURL
         )
+    }
+
+    private static func writeTranscriptAtomicallyWithoutOverwriting(
+        _ transcript: String,
+        to outputURL: URL
+    ) throws {
+        let temporaryURL = outputURL.deletingLastPathComponent()
+            .appendingPathComponent(".\(outputURL.lastPathComponent).\(UUID().uuidString).tmp")
+        defer { try? FileManager.default.removeItem(at: temporaryURL) }
+
+        try Data(transcript.utf8).write(to: temporaryURL, options: .atomic)
+        guard !FileManager.default.fileExists(atPath: outputURL.path) else {
+            throw RecoveryError.outputExists(outputURL.path)
+        }
+        try FileManager.default.moveItem(at: temporaryURL, to: outputURL)
     }
 
     private struct Request {
@@ -111,27 +119,21 @@ private enum RecoveryError: LocalizedError {
     case usage
     case inputMissing(String)
     case outputExists(String)
-    case unsupportedInput
     case unknownModel(String)
     case missingAPIKey
-    case emptyTranscript
 
     var errorDescription: String? {
         switch self {
         case .usage:
-            "Использование: --transcribe-existing <input.m4a> --output <output.txt> [--model <id>]"
+            "Использование: --transcribe-existing <audio-or-video> --output <output.txt> [--model <id>]"
         case .inputMissing(let path):
             "Аудиофайл не найден: \(path)"
         case .outputExists(let path):
             "Файл транскрипта уже существует: \(path)"
-        case .unsupportedInput:
-            "Повторная транскрибация сейчас поддерживает только M4A"
         case .unknownModel(let model):
             "Неизвестная модель: \(model)"
         case .missingAPIKey:
             "OpenAI API key не найден в Keychain"
-        case .emptyTranscript:
-            "OpenAI вернул пустую транскрипцию"
         }
     }
 }

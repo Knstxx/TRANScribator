@@ -23,7 +23,7 @@ public enum TranscriptionModel: String, CaseIterable, Identifiable, Sendable {
         }
     }
 
-    var supportsPrompt: Bool { self != .diarize }
+    public var supportsPrompt: Bool { self != .diarize }
 
     public var usesAutomaticChunking: Bool { self != .whisper }
 }

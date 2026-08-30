@@ -12,6 +12,7 @@ venv/
 .DS_Store
 .idea/
 .vscode/
+node_modules/
 logs/
 *.log
 recording_*.mp3

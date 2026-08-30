@@ -1,6 +1,6 @@
 import Foundation
 
-public final class OpenAITranscriptionClient {
+public final class OpenAITranscriptionClient: @unchecked Sendable {
     private let apiKey: String
     private let endpoint: URL
     private let session: URLSession
@@ -27,7 +27,9 @@ public final class OpenAITranscriptionClient {
         model: TranscriptionModel,
         prompt: String? = nil
     ) async throws -> String {
+        try Task.checkCancellation()
         let fileData = try Data(contentsOf: fileURL, options: .mappedIfSafe)
+        try Task.checkCancellation()
         let multipart = MultipartFormData()
         multipart.addField(name: "model", value: model.rawValue)
         if model.usesAutomaticChunking {
@@ -58,6 +60,7 @@ public final class OpenAITranscriptionClient {
 
         var lastError: Error?
         for attempt in 0..<3 {
+            try Task.checkCancellation()
             do {
                 let (data, response) = try await session.data(for: request)
                 guard let http = response as? HTTPURLResponse else {
@@ -74,6 +77,11 @@ public final class OpenAITranscriptionClient {
                 }
                 return try TranscriptionResponseParser.parse(data: data, model: model)
             } catch {
+                if error is CancellationError
+                    || (error as? URLError)?.code == .cancelled {
+                    throw CancellationError()
+                }
+                try Task.checkCancellation()
                 lastError = error
                 guard attempt < 2, Self.isRetryable(error) else { throw error }
                 try await Task.sleep(nanoseconds: UInt64(attempt + 1) * 1_000_000_000)

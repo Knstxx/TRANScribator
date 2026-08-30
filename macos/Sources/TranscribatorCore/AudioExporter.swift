@@ -12,7 +12,7 @@ public struct AudioVolumePoint: Equatable, Sendable {
     }
 }
 
-public final class AudioExporter {
+public final class AudioExporter: @unchecked Sendable {
     public init() {}
 
     public func mixToM4A(
@@ -22,29 +22,36 @@ public final class AudioExporter {
         quality: AudioQuality = .standard,
         volumeAutomation: [URL: [AudioVolumePoint]] = [:]
     ) async throws {
+        try Task.checkCancellation()
         guard !sources.isEmpty else { throw AudioExportError.noAudioTracks }
 
         let composition = AVMutableComposition()
         var mixParameters: [AVMutableAudioMixInputParameters] = []
 
         for source in sources {
+            try Task.checkCancellation()
             let asset = AVURLAsset(url: source)
             guard let sourceTrack = try await asset.loadTracks(withMediaType: .audio).first else {
                 continue
             }
-            let duration = try await asset.load(.duration)
+            let sourceTimeRange = try await sourceTrack.load(.timeRange)
+            guard sourceTimeRange.duration.isValid,
+                  sourceTimeRange.duration.isNumeric,
+                  CMTimeGetSeconds(sourceTimeRange.duration) > 0 else {
+                continue
+            }
             guard let track = composition.addMutableTrack(
                 withMediaType: .audio,
                 preferredTrackID: kCMPersistentTrackID_Invalid
             ) else { continue }
             try track.insertTimeRange(
-                CMTimeRange(start: .zero, duration: duration),
+                sourceTimeRange,
                 of: sourceTrack,
                 at: .zero
             )
             let parameters = AVMutableAudioMixInputParameters(track: track)
             if let points = volumeAutomation[source], !points.isEmpty {
-                apply(points, to: parameters, sourceDuration: duration)
+                apply(points, to: parameters, sourceDuration: sourceTimeRange.duration)
             } else {
                 parameters.setVolume(sources.count > 1 ? 0.65 : 1.0, at: .zero)
             }
@@ -102,15 +109,13 @@ public final class AudioExporter {
             throw reader.error ?? AudioExportError.readerStart
         }
 
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            AudioExportPump(
-                reader: reader,
-                output: readerOutput,
-                writer: writer,
-                input: writerInput,
-                continuation: continuation
-            ).start()
-        }
+        let pump = AudioExportPump(
+            reader: reader,
+            output: readerOutput,
+            writer: writer,
+            input: writerInput
+        )
+        try await pump.run()
     }
 
     public func duration(of url: URL) async throws -> CMTime {
@@ -198,51 +203,110 @@ private final class AudioExportPump: @unchecked Sendable {
     private let output: AVAssetReaderAudioMixOutput
     private let writer: AVAssetWriter
     private let input: AVAssetWriterInput
-    private let continuation: CheckedContinuation<Void, Error>
     private let queue = DispatchQueue(label: "app.transcribator.audio-export")
+    private let stateLock = NSLock()
+    private var continuation: CheckedContinuation<Void, Error>?
+    private var terminalResult: Result<Void, Error>?
+    private var cancellationRequested = false
 
     init(
         reader: AVAssetReader,
         output: AVAssetReaderAudioMixOutput,
         writer: AVAssetWriter,
-        input: AVAssetWriterInput,
-        continuation: CheckedContinuation<Void, Error>
+        input: AVAssetWriterInput
     ) {
         self.reader = reader
         self.output = output
         self.writer = writer
         self.input = input
-        self.continuation = continuation
     }
 
-    func start() {
-        input.requestMediaDataWhenReady(on: queue) { [self] in pump() }
+    func run() async throws {
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                if install(continuation) {
+                    input.requestMediaDataWhenReady(on: queue) { [self] in pump() }
+                }
+            }
+        } onCancel: {
+            requestCancellation()
+        }
     }
 
     private func pump() {
         while input.isReadyForMoreMediaData {
+            if isCancellationRequested {
+                cancelOnQueue()
+                return
+            }
             if let buffer = output.copyNextSampleBuffer() {
                 if !input.append(buffer) {
                     reader.cancelReading()
                     input.markAsFinished()
                     writer.cancelWriting()
-                    continuation.resume(throwing: writer.error ?? AudioExportError.append)
+                    complete(.failure(writer.error ?? AudioExportError.append))
                     return
                 }
             } else {
                 input.markAsFinished()
                 writer.finishWriting { [self] in
-                    if reader.status == .failed {
-                        continuation.resume(throwing: reader.error ?? AudioExportError.readerFailed)
+                    if isCancellationRequested {
+                        complete(.failure(CancellationError()))
+                    } else if reader.status == .failed {
+                        complete(.failure(reader.error ?? AudioExportError.readerFailed))
                     } else if writer.status == .completed {
-                        continuation.resume()
+                        complete(.success(()))
                     } else {
-                        continuation.resume(throwing: writer.error ?? AudioExportError.writerFailed)
+                        complete(.failure(writer.error ?? AudioExportError.writerFailed))
                     }
                 }
                 return
             }
         }
+    }
+
+    private var isCancellationRequested: Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return cancellationRequested
+    }
+
+    private func install(_ continuation: CheckedContinuation<Void, Error>) -> Bool {
+        stateLock.lock()
+        if let terminalResult {
+            stateLock.unlock()
+            continuation.resume(with: terminalResult)
+            return false
+        }
+        self.continuation = continuation
+        stateLock.unlock()
+        return true
+    }
+
+    private func requestCancellation() {
+        stateLock.lock()
+        cancellationRequested = true
+        stateLock.unlock()
+        queue.async { [self] in cancelOnQueue() }
+    }
+
+    private func cancelOnQueue() {
+        reader.cancelReading()
+        writer.cancelWriting()
+        complete(.failure(CancellationError()))
+    }
+
+    private func complete(_ result: Result<Void, Error>) {
+        stateLock.lock()
+        guard terminalResult == nil else {
+            stateLock.unlock()
+            return
+        }
+        terminalResult = result
+        let continuation = continuation
+        self.continuation = nil
+        stateLock.unlock()
+        continuation?.resume(with: result)
     }
 }
 

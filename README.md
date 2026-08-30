@@ -6,6 +6,8 @@ Transcribator is a native macOS menu-bar app that records system audio and micro
 
 - Native macOS menu-bar app: no virtual audio driver, Docker, Python, or ffmpeg required.
 - Records system audio and microphone input; the microphone can be muted and both levels can be changed during recording.
+- Cancels an active recording without saving audio, creating a transcript, or calling the API.
+- Transcribes an existing audio or video file after extracting and compressing only its audio track locally.
 - Saves transcripts as TXT and, optionally, recordings as M4A.
 - Supports `gpt-transcribe`, `gpt-4o-transcribe-diarize`, and `whisper-1`.
 - Splits long audio automatically and cleans up working files.
@@ -19,6 +21,8 @@ Requirements: macOS 15 or later and your own OpenAI API key.
 3. Open it; the app appears in the menu bar, not in the Dock.
 4. Open **Settings**, save the OpenAI API key, and choose output folders.
 5. Allow **Microphone** and **Screen & System Audio Recording** when macOS asks, then restart the app.
+
+Use **Transcribe file** in the menu to select an audio or video file. The source stays unchanged, video is not uploaded, and the resulting TXT is saved in the configured transcripts folder.
 
 The API key is stored in macOS Keychain. Audio is sent to `https://api.openai.com/v1/audio/transcriptions`; it is not uploaded anywhere else by the macOS app.
 

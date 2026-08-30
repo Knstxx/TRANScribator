@@ -2,6 +2,7 @@ import AppKit
 import Foundation
 import SwiftUI
 import TranscribatorCore
+import UniformTypeIdentifiers
 @preconcurrency import UserNotifications
 
 @MainActor
@@ -11,6 +12,7 @@ final class AppState: ObservableObject {
         case recording
         case processing(String)
         case done(copied: Bool)
+        case cancelled(String)
         case failed(String)
     }
 
@@ -19,6 +21,10 @@ final class AppState: ObservableObject {
     @Published private(set) var hasAPIKey = false
     @Published private(set) var lastTranscriptURL: URL?
     @Published private(set) var lastRecordingURL: URL?
+    @Published private(set) var selectedMediaFile: MediaFileInfo?
+    @Published private(set) var isFileTranscribing = false
+    @Published private(set) var isInspectingMediaFile = false
+    @Published var filePrompt = ""
     @Published private(set) var audioDirectoryURL: URL
     @Published private(set) var transcriptsDirectoryURL: URL
     @Published var savesAudioRecording: Bool {
@@ -63,7 +69,8 @@ final class AppState: ObservableObject {
 
     private let capture = AudioCaptureSession()
     private let exporter = AudioExporter()
-    private let chunker = AudioChunker()
+    private let mediaPreparer = MediaFilePreparer()
+    private let transcriptionPipeline = AudioTranscriptionPipeline()
     private let keychain = KeychainStore()
     private var sessionDirectory: URL?
     private var sessionFileStem: String?
@@ -71,6 +78,8 @@ final class AppState: ObservableObject {
     private var sessionStartedUptime: TimeInterval?
     private var microphoneVolumePoints: [AudioVolumePoint] = []
     private var systemVolumePoints: [AudioVolumePoint] = []
+    private var fileTranscriptionTask: Task<Void, Never>?
+    private var mediaInspectionTask: Task<Void, Never>?
 
     private static let audioDirectoryKey = "audioDirectory"
     private static let transcriptsDirectoryKey = "transcriptsDirectory"
@@ -135,6 +144,7 @@ final class AppState: ObservableObject {
         case .processing(let text): text
         case .done(let copied):
             copied ? "Транскрипция готова и скопирована" : "Транскрипция готова"
+        case .cancelled(let text): text
         case .failed(let message): message
         }
     }
@@ -145,6 +155,7 @@ final class AppState: ObservableObject {
             isMicrophoneMuted ? "waveform.badge.xmark" : "record.circle.fill"
         case .processing: "waveform.badge.magnifyingglass"
         case .done: "checkmark.circle"
+        case .cancelled: "xmark.circle"
         case .failed: "exclamationmark.triangle"
         case .idle: "waveform"
         }
@@ -208,6 +219,217 @@ final class AppState: ObservableObject {
         return url.standardizedFileURL
     }
 
+    func chooseMediaFile() {
+        guard !isRecording, !isBusy, !isFileTranscribing, !isInspectingMediaFile else { return }
+
+        let panel = NSOpenPanel()
+        panel.title = "Транскрибировать аудио или видео"
+        panel.prompt = "Выбрать"
+        panel.message = "Видео останется на Mac: приложение извлечёт и отправит только аудиодорожку."
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        panel.allowsMultipleSelection = false
+        panel.allowedContentTypes = [.audio, .movie]
+
+        guard panel.runModal() == .OK, let sourceURL = panel.url else { return }
+        let standardizedURL = sourceURL.standardizedFileURL
+        isInspectingMediaFile = true
+        phase = .processing("Проверка выбранного файла…")
+
+        let task = Task { [weak self] in
+            guard let self else { return }
+            await self.inspectMediaFile(at: standardizedURL)
+        }
+        mediaInspectionTask = task
+    }
+
+    private func inspectMediaFile(at sourceURL: URL) async {
+        defer {
+            mediaInspectionTask = nil
+            isInspectingMediaFile = false
+        }
+        do {
+            selectedMediaFile = try await mediaPreparer.inspect(sourceURL)
+            filePrompt = ""
+            phase = .idle
+        } catch is CancellationError {
+            phase = .cancelled("Выбор файла отменён")
+        } catch {
+            phase = .failed(error.localizedDescription)
+        }
+    }
+
+    func cancelMediaInspection() {
+        guard isInspectingMediaFile, let task = mediaInspectionTask else { return }
+        phase = .processing("Отмена загрузки файла…")
+        task.cancel()
+    }
+
+    func clearSelectedMediaFile() {
+        guard !isFileTranscribing, !isInspectingMediaFile else { return }
+        selectedMediaFile = nil
+        filePrompt = ""
+        resetStatus()
+    }
+
+    func transcribeSelectedMediaFile() {
+        guard let media = selectedMediaFile,
+              !isRecording,
+              !isBusy,
+              !isInspectingMediaFile else { return }
+        guard hasAPIKey else {
+            phase = .failed("Сначала сохраните OpenAI API key")
+            return
+        }
+
+        let apiKey: String
+        do {
+            guard let value = try keychain.read(), !value.isEmpty else {
+                hasAPIKey = false
+                phase = .failed(AppStateError.missingAPIKey.localizedDescription)
+                return
+            }
+            apiKey = value
+        } catch {
+            phase = .failed("Не удалось прочитать API key: \(error.localizedDescription)")
+            return
+        }
+
+        let session: (directory: URL, fileStem: String)
+        do {
+            session = try makeWorkingSession(
+                fileStem: Self.safeFileStem(for: media.sourceURL)
+            )
+        } catch {
+            phase = .failed(error.localizedDescription)
+            return
+        }
+
+        let model = selectedModel
+        let quality = selectedAudioQuality
+        let prompt = filePrompt
+        let transcriptOutputDirectory = transcriptsDirectoryURL
+        let shouldCopyTranscript = copiesTranscriptToClipboard
+
+        isFileTranscribing = true
+        phase = .processing(
+            media.kind == .video ? "Извлечение аудиодорожки…" : "Подготовка аудио…"
+        )
+        let task = Task { [weak self] in
+            guard let self else { return }
+            await self.runFileTranscription(
+                media: media,
+                directory: session.directory,
+                fileStem: session.fileStem,
+                apiKey: apiKey,
+                model: model,
+                quality: quality,
+                initialPrompt: prompt,
+                transcriptOutputDirectory: transcriptOutputDirectory,
+                shouldCopyTranscript: shouldCopyTranscript
+            )
+        }
+        fileTranscriptionTask = task
+    }
+
+    func cancelFileTranscription() {
+        guard isFileTranscribing, let task = fileTranscriptionTask else { return }
+        phase = .processing("Отмена обработки файла…")
+        task.cancel()
+    }
+
+    private func runFileTranscription(
+        media: MediaFileInfo,
+        directory: URL,
+        fileStem: String,
+        apiKey: String,
+        model: TranscriptionModel,
+        quality: AudioQuality,
+        initialPrompt: String,
+        transcriptOutputDirectory: URL,
+        shouldCopyTranscript: Bool
+    ) async {
+        var createdTranscriptURL: URL?
+        defer {
+            fileTranscriptionTask = nil
+            isFileTranscribing = false
+        }
+
+        do {
+            let preparedAudioURL = directory.appendingPathComponent("prepared.m4a")
+            try await mediaPreparer.prepare(
+                sourceURL: media.sourceURL,
+                destinationURL: preparedAudioURL,
+                quality: quality
+            )
+            try Task.checkCancellation()
+
+            let client = OpenAITranscriptionClient(apiKey: apiKey)
+            let transcript = try await transcriptionPipeline.transcribe(
+                audioURL: preparedAudioURL,
+                quality: quality,
+                model: model,
+                initialPrompt: initialPrompt,
+                client: client
+            ) { [weak self] progress in
+                guard let self else { return }
+                switch progress {
+                case .preparingUploads:
+                    self.phase = .processing("Подготовка к отправке…")
+                case .transcribing(let current, let total):
+                    self.phase = .processing(
+                        total == 1
+                            ? "Транскрибирование файла…"
+                            : "Транскрибирование файла \(current) из \(total)…"
+                    )
+                }
+            }
+            try Task.checkCancellation()
+
+            try FileManager.default.createDirectory(
+                at: transcriptOutputDirectory,
+                withIntermediateDirectories: true
+            )
+            let transcriptURL = uniqueOutputURL(
+                directory: transcriptOutputDirectory,
+                fileStem: fileStem,
+                fileExtension: "txt"
+            )
+            try transcript.write(to: transcriptURL, atomically: true, encoding: .utf8)
+            createdTranscriptURL = transcriptURL
+            try Task.checkCancellation()
+            try Self.removeWorkingSession(at: directory)
+            try Task.checkCancellation()
+            lastTranscriptURL = transcriptURL
+            if shouldCopyTranscript { copyToPasteboard(transcript) }
+            phase = .done(copied: shouldCopyTranscript)
+            notifyFinished(copied: shouldCopyTranscript)
+        } catch is CancellationError {
+            if let createdTranscriptURL {
+                try? FileManager.default.removeItem(at: createdTranscriptURL)
+                if lastTranscriptURL == createdTranscriptURL { lastTranscriptURL = nil }
+            }
+            do {
+                try Self.removeWorkingSession(at: directory)
+                phase = .cancelled("Транскрибация файла отменена")
+            } catch {
+                phase = .failed(
+                    "Обработка отменена, но временные файлы удалить не удалось: \(error.localizedDescription)"
+                )
+            }
+        } catch {
+            let operationError = error
+            do {
+                try Self.removeWorkingSession(at: directory)
+                phase = .failed(operationError.localizedDescription)
+            } catch {
+                phase = .failed(
+                    "\(operationError.localizedDescription). Временные файлы удалить не удалось: \(error.localizedDescription)"
+                )
+            }
+        }
+    }
+
     func toggleRecording() {
         if isRecording {
             stopRecording()
@@ -263,7 +485,7 @@ final class AppState: ObservableObject {
             phase = .recording
         } catch {
             if let workingDirectory {
-                Self.removeWorkingSession(at: workingDirectory)
+                try? Self.removeWorkingSession(at: workingDirectory)
             }
             sessionAudioQuality = nil
             clearVolumeAutomation()
@@ -280,7 +502,7 @@ final class AppState: ObservableObject {
         guard let directory = sessionDirectory,
               let fileStem = sessionFileStem,
               let audioQuality = sessionAudioQuality else {
-            if let sessionDirectory { Self.removeWorkingSession(at: sessionDirectory) }
+            if let sessionDirectory { try? Self.removeWorkingSession(at: sessionDirectory) }
             sessionDirectory = nil
             sessionFileStem = nil
             sessionAudioQuality = nil
@@ -298,11 +520,12 @@ final class AppState: ObservableObject {
         let shouldCopyTranscript = copiesTranscriptToClipboard
         let audioOutputDirectory = audioDirectoryURL
         let transcriptOutputDirectory = transcriptsDirectoryURL
+        let model = selectedModel
 
         Task {
             do {
                 defer {
-                    Self.removeWorkingSession(at: directory)
+                    try? Self.removeWorkingSession(at: directory)
                 }
 
                 let workingRecordingURL = directory.appendingPathComponent("recording.m4a")
@@ -335,33 +558,28 @@ final class AppState: ObservableObject {
                     lastRecordingURL = nil
                 }
 
-                phase = .processing("Подготовка к отправке…")
-                let uploadFiles = try await chunker.uploadFiles(
-                    for: workingRecordingURL,
-                    quality: audioQuality
-                )
                 guard let key = try keychain.read(), !key.isEmpty else {
                     throw AppStateError.missingAPIKey
                 }
                 let client = OpenAITranscriptionClient(apiKey: key)
-
-                var results: [String] = []
-                for (index, file) in uploadFiles.enumerated() {
-                    phase = .processing(
-                        uploadFiles.count == 1
-                            ? "Транскрибирование…"
-                            : "Транскрибирование \(index + 1) из \(uploadFiles.count)…"
-                    )
-                    let prompt = selectedModel == .diarize ? nil : results.last
-                    let text = try await client.transcribe(
-                        fileURL: file,
-                        model: selectedModel,
-                        prompt: prompt
-                    )
-                    if !text.isEmpty { results.append(text) }
+                let transcript = try await transcriptionPipeline.transcribe(
+                    audioURL: workingRecordingURL,
+                    quality: audioQuality,
+                    model: model,
+                    client: client
+                ) { [weak self] progress in
+                    guard let self else { return }
+                    switch progress {
+                    case .preparingUploads:
+                        self.phase = .processing("Подготовка к отправке…")
+                    case .transcribing(let current, let total):
+                        self.phase = .processing(
+                            total == 1
+                                ? "Транскрибирование…"
+                                : "Транскрибирование \(current) из \(total)…"
+                        )
+                    }
                 }
-
-                let transcript = results.joined(separator: "\n\n")
                 try FileManager.default.createDirectory(
                     at: transcriptOutputDirectory,
                     withIntermediateDirectories: true
@@ -382,6 +600,31 @@ final class AppState: ObservableObject {
         }
     }
 
+    func cancelRecording() {
+        guard isRecording else { return }
+
+        _ = capture.stop()
+        let directory = sessionDirectory
+        startedAt = nil
+        sessionDirectory = nil
+        sessionFileStem = nil
+        sessionAudioQuality = nil
+        clearVolumeAutomation()
+
+        guard let directory else {
+            phase = .failed(AppStateError.missingSession.localizedDescription)
+            return
+        }
+        do {
+            try Self.removeWorkingSession(at: directory)
+            phase = .cancelled("Запись отменена · аудио удалено")
+        } catch {
+            phase = .failed(
+                "Запись остановлена, но временные файлы удалить не удалось: \(error.localizedDescription)"
+            )
+        }
+    }
+
     func revealLastResult() {
         guard let url = lastTranscriptURL ?? lastRecordingURL else { return }
         NSWorkspace.shared.activateFileViewerSelecting([url])
@@ -391,14 +634,21 @@ final class AppState: ObservableObject {
         if !isRecording && !isBusy { phase = .idle }
     }
 
-    private func makeWorkingSession() throws -> (directory: URL, fileStem: String) {
+    private func makeWorkingSession(
+        fileStem suppliedFileStem: String? = nil
+    ) throws -> (directory: URL, fileStem: String) {
         let root = Self.workingRootDirectory()
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
 
-        let formatter = DateFormatter()
-        formatter.dateFormat = "yyyy-MM-dd_HH-mm-ss"
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        let fileStem = formatter.string(from: Date())
+        let fileStem: String
+        if let suppliedFileStem, !suppliedFileStem.isEmpty {
+            fileStem = suppliedFileStem
+        } else {
+            let formatter = DateFormatter()
+            formatter.dateFormat = "yyyy-MM-dd_HH-mm-ss"
+            formatter.locale = Locale(identifier: "en_US_POSIX")
+            fileStem = formatter.string(from: Date())
+        }
         let directory = root.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         return (directory, fileStem)
@@ -414,6 +664,22 @@ final class AppState: ObservableObject {
             suffix += 1
         }
         return candidate
+    }
+
+    private static func safeFileStem(for sourceURL: URL) -> String {
+        let original = sourceURL.deletingPathExtension().lastPathComponent
+        let allowed = CharacterSet.alphanumerics
+            .union(.whitespaces)
+            .union(CharacterSet(charactersIn: "-_"))
+        let sanitizedScalars = original.unicodeScalars.map { scalar -> Character in
+            allowed.contains(scalar) ? Character(String(scalar)) : "-"
+        }
+        var sanitized = String(sanitizedScalars)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        while sanitized.contains("--") {
+            sanitized = sanitized.replacingOccurrences(of: "--", with: "-")
+        }
+        return sanitized.isEmpty ? "Транскрипция" : sanitized
     }
 
     private func recordVolumeChange(microphone: Bool) {
@@ -515,19 +781,47 @@ final class AppState: ObservableObject {
 
     private static func removeStaleWorkingFiles() {
         try? FileManager.default.removeItem(at: workingRootDirectory())
-        removeDirectoryIfEmpty(at: workingContainerDirectory())
+        try? removeDirectoryIfEmpty(at: workingContainerDirectory())
+        removeStaleTemporaryDirectories()
     }
 
-    private static func removeWorkingSession(at directory: URL) {
-        try? FileManager.default.removeItem(at: directory)
-        removeDirectoryIfEmpty(at: workingRootDirectory())
-        removeDirectoryIfEmpty(at: workingContainerDirectory())
+    private static func removeStaleTemporaryDirectories() {
+        let prefixes = [
+            "TranscribatorRecovery-",
+            "TranscribatorCoreChecks-",
+            "TranscribatorCaptureSmoke-",
+            "TranscribatorCaptureCancelSmoke-"
+        ]
+        let cutoff = Date().addingTimeInterval(-24 * 60 * 60)
+        let keys: Set<URLResourceKey> = [.isDirectoryKey, .contentModificationDateKey]
+        guard let candidates = try? FileManager.default.contentsOfDirectory(
+            at: FileManager.default.temporaryDirectory,
+            includingPropertiesForKeys: Array(keys),
+            options: [.skipsHiddenFiles]
+        ) else { return }
+
+        for candidate in candidates where prefixes.contains(where: candidate.lastPathComponent.hasPrefix) {
+            guard let values = try? candidate.resourceValues(forKeys: keys),
+                  values.isDirectory == true,
+                  let modifiedAt = values.contentModificationDate,
+                  modifiedAt < cutoff else { continue }
+            try? FileManager.default.removeItem(at: candidate)
+        }
     }
 
-    private static func removeDirectoryIfEmpty(at directory: URL) {
-        guard let contents = try? FileManager.default.contentsOfDirectory(atPath: directory.path),
-              contents.isEmpty else { return }
-        try? FileManager.default.removeItem(at: directory)
+    private static func removeWorkingSession(at directory: URL) throws {
+        if FileManager.default.fileExists(atPath: directory.path) {
+            try FileManager.default.removeItem(at: directory)
+        }
+        try removeDirectoryIfEmpty(at: workingRootDirectory())
+        try removeDirectoryIfEmpty(at: workingContainerDirectory())
+    }
+
+    private static func removeDirectoryIfEmpty(at directory: URL) throws {
+        guard FileManager.default.fileExists(atPath: directory.path) else { return }
+        let contents = try FileManager.default.contentsOfDirectory(atPath: directory.path)
+        guard contents.isEmpty else { return }
+        try FileManager.default.removeItem(at: directory)
     }
 }
 

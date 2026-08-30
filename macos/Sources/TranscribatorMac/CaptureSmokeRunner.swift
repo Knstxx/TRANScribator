@@ -6,16 +6,26 @@ import TranscribatorCore
 
 enum CaptureSmokeRunner {
     private static let systemOnlyArgument = "--capture-smoke-system-only"
+    private static let cancellationArgument = "--capture-cancel-smoke"
 
     static var isRequested: Bool {
         let arguments = ProcessInfo.processInfo.arguments
-        return arguments.contains("--capture-smoke") || arguments.contains(systemOnlyArgument)
+        return arguments.contains("--capture-smoke")
+            || arguments.contains(systemOnlyArgument)
+            || arguments.contains(cancellationArgument)
     }
 
     @MainActor
     static func runAndExit() async {
         var testDirectory: URL?
         do {
+            if ProcessInfo.processInfo.arguments.contains(cancellationArgument) {
+                try await runCancellationSmoke()
+                print("CAPTURE_CANCEL_SMOKE_OK cleaned=true apiRequested=false")
+                fflush(stdout)
+                exit(EXIT_SUCCESS)
+            }
+
             let includesMicrophone = !ProcessInfo.processInfo.arguments.contains(systemOnlyArgument)
             if includesMicrophone {
                 guard await AudioCaptureSession.requestMicrophoneAccess() else {
@@ -96,6 +106,27 @@ enum CaptureSmokeRunner {
             fputs("CAPTURE_SMOKE_FAILED \(error.localizedDescription)\n", stderr)
             fflush(stderr)
             exit(EXIT_FAILURE)
+        }
+    }
+
+    private static func runCancellationSmoke() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("TranscribatorCaptureCancelSmoke-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        var needsCleanup = true
+        defer {
+            if needsCleanup { try? FileManager.default.removeItem(at: directory) }
+        }
+
+        let capture = AudioCaptureSession()
+        try capture.start(in: directory, includeMicrophone: false)
+        try await Task.sleep(nanoseconds: 500_000_000)
+        let sources = capture.stop()
+        guard !sources.isEmpty else { throw CaptureSmokeError.systemSourceMissing }
+        try FileManager.default.removeItem(at: directory)
+        needsCleanup = false
+        guard !FileManager.default.fileExists(atPath: directory.path) else {
+            throw CaptureSmokeError.cancellationCleanupFailed
         }
     }
 
@@ -187,6 +218,7 @@ enum CaptureSmokeError: LocalizedError {
     case microphoneSourceUnexpected
     case liveMuteMissing(silentSeconds: Double)
     case liveUnmuteMissing(restoredRMS: Double)
+    case cancellationCleanupFailed
 
     var errorDescription: String? {
         switch self {
@@ -206,6 +238,8 @@ enum CaptureSmokeError: LocalizedError {
             "Live microphone mute did not produce silence (longest run=\(silentSeconds)s)"
         case .liveUnmuteMissing(let restoredRMS):
             "Microphone signal did not return after live unmute (rms=\(restoredRMS))"
+        case .cancellationCleanupFailed:
+            "Cancelled recording working files were not removed"
         }
     }
 }

@@ -52,7 +52,7 @@ public struct AudioChunkingPolicy: Sendable {
     }
 }
 
-public final class AudioChunker {
+public final class AudioChunker: @unchecked Sendable {
     private let policy: AudioChunkingPolicy
     private let exporter: AudioExporter
 
@@ -68,6 +68,7 @@ public final class AudioChunker {
         for recordingURL: URL,
         quality: AudioQuality = .standard
     ) async throws -> [URL] {
+        try Task.checkCancellation()
         let values = try recordingURL.resourceValues(forKeys: [.fileSizeKey])
         let size = Int64(values.fileSize ?? 0)
         let duration = try await exporter.duration(of: recordingURL)
@@ -81,6 +82,7 @@ public final class AudioChunker {
 
         do {
             for (index, range) in ranges.enumerated() {
+                try Task.checkCancellation()
                 let url = directory.appendingPathComponent(
                     String(format: "\(uploadStem)-%02d.m4a", index + 1)
                 )
@@ -91,6 +93,7 @@ public final class AudioChunker {
                     timeRange: range,
                     quality: quality
                 )
+                try Task.checkCancellation()
                 let chunkSize = Int64((try url.resourceValues(forKeys: [.fileSizeKey])).fileSize ?? 0)
                 guard chunkSize <= policy.maxUploadBytes else {
                     throw AudioChunkingError.chunkStillTooLarge(size: chunkSize)
