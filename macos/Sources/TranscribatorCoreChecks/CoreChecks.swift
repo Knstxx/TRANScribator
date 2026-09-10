@@ -25,9 +25,146 @@ struct TranscribatorCoreChecks {
     static func runChecks() async throws {
         try checkChunkingPolicy()
         try checkAudioQualityPolicy()
+        try checkGPTAppPolicy()
+        try await checkChatGPTClient()
+        try await GPTAppPipelineChecks.run()
+        try checkAppStatusPolicy()
         try checkMultipartAndResponseParsing()
         try await checkCancelledRequestIsNotRetried()
         try await checkNativeAudioPipeline()
+    }
+
+    private static func checkGPTAppPolicy() throws {
+        try require(TranscriptionModel.allCases == [.transcribe, .diarize, .whisper, .gptApp], "GPT App must be the fourth model")
+        try require(TranscriptionModel.gptApp.title == "GPT App", "GPT App display name changed")
+        try require(!TranscriptionModel.gptApp.requiresAPIKey, "GPT App must not need an API key")
+        try require(!TranscriptionModel.gptApp.supportsPrompt && !TranscriptionModel.gptApp.usesAutomaticChunking,
+                    "GPT App must not send unsupported API parameters")
+        let duration = CMTime(seconds: 591, preferredTimescale: 600)
+        try require(AudioChunkingPolicy.gptApp.chunkCount(forFileSize: 5_000_000, duration: duration) == 2,
+                    "GPT App must split audio over 9 minutes 50 seconds")
+        try require(AudioChunkingPolicy().chunkCount(forFileSize: 500_000, duration: duration) == 1,
+                    "API chunking must remain unchanged")
+        let policy = AudioChunkingPolicy.gptApp
+        for (seconds, count) in [(61.0, 1), (590.0, 1), (590.01, 2), (1180.0, 2), (1180.01, 3), (3600.0, 7)] {
+            let duration = CMTime(seconds: seconds, preferredTimescale: 600)
+            let ranges = policy.timeRanges(duration: duration, fileSize: 1_000_000)
+            try require(ranges.count == count, "GPT App duration boundary produced the wrong number of parts")
+            try require(ranges.allSatisfy { CMTimeGetSeconds($0.duration) <= 590.001 },
+                        "GPT App chunk exceeds 9 minutes 50 seconds")
+            try require(abs(ranges.reduce(0) { $0 + CMTimeGetSeconds($1.duration) } - seconds) < 0.01,
+                        "GPT App chunk boundaries lost audio duration")
+        }
+        for quality in AudioQuality.allCases {
+            let estimatedSize = Int64(quality.bitRate) * 590 / 8 + 200_000
+            try require(policy.chunkCount(forFileSize: estimatedSize, duration: CMTime(seconds: 590, preferredTimescale: 600)) == 1,
+                        "GPT App byte limit must allow 9:50 audio at every supported quality")
+        }
+        try require(policy.chunkCount(forFileSize: 24_000_001) == 2,
+                    "GPT App must still enforce its upload byte limit")
+        let audio = RecordingAudioStatus(includesMicrophone: true, microphoneVolume: 1, systemAudioVolume: 1)
+        let warning = "Войдите в ChatGPT для использования GPT App"
+        let missing = AppStatus(phase: .idle, audio: audio, authorizationRequiredMessage: warning)
+        try require(missing.statusText == warning && missing.tone == .warning,
+                    "GPT App must show its own authentication warning")
+        let ready = AppStatus(phase: .idle, audio: audio, authorizationRequiredMessage: nil)
+        try require(ready.statusText == "Готов к записи" && ready.tone == .neutral,
+                    "A ready ChatGPT session must work without an API key")
+    }
+
+    private static func checkAppStatusPolicy() throws {
+        let fixtures: [(audio: RecordingAudioStatus, microphoneMuted: Bool, systemMuted: Bool,
+                        recordingText: String, recordingAudioSymbol: String?)] = [
+            (.init(includesMicrophone: true, microphoneVolume: 1, systemAudioVolume: 0.65),
+             false, false, "Запись системного звука и микрофона", nil),
+            (.init(includesMicrophone: false, microphoneVolume: 1, systemAudioVolume: 0.65),
+             true, false, "Запись только системного звука", "mic.slash.fill"),
+            (.init(includesMicrophone: true, microphoneVolume: 0, systemAudioVolume: 0.65),
+             true, false, "Запись только системного звука", "mic.slash.fill"),
+            (.init(includesMicrophone: true, microphoneVolume: 0.5, systemAudioVolume: 0),
+             false, true, "Запись только микрофона", "speaker.slash.fill"),
+            (.init(includesMicrophone: false, microphoneVolume: 1, systemAudioVolume: 0),
+             true, true, "Запись идёт без звука", "exclamationmark.triangle.fill"),
+            (.init(includesMicrophone: true, microphoneVolume: 0, systemAudioVolume: 0),
+             true, true, "Запись идёт без звука", "exclamationmark.triangle.fill")
+        ]
+        let operationFixtures: [(phase: TranscriptionPhase, text: String, symbol: String,
+                                 tone: AppStatusTone)] = [
+            (.processing("Сведение аудио…"), "Сведение аудио…", "arrow.triangle.2.circlepath", .working),
+            (.processing("Транскрибирование 2 из 3…"), "Транскрибирование 2 из 3…",
+             "arrow.triangle.2.circlepath", .working),
+            (.done(copied: false), "Транскрипция готова", "checkmark.circle.fill", .success),
+            (.done(copied: true), "Транскрипция готова и скопирована", "checkmark.circle.fill", .success),
+            (.cancelled("Запись отменена · аудио удалено"), "Запись отменена · аудио удалено",
+             "xmark.circle", .neutral),
+            (.failed("Не удалось сохранить аудио"), "Не удалось сохранить аудио",
+             "exclamationmark.triangle.fill", .failure)
+        ]
+
+        for fixture in fixtures {
+            let audio = fixture.audio
+            let hasAudibleSource = !fixture.microphoneMuted || !fixture.systemMuted
+            try require(audio.isMicrophoneMuted == fixture.microphoneMuted, "Microphone mute detection is incorrect")
+            try require(audio.isSystemAudioMuted == fixture.systemMuted, "System mute detection is incorrect")
+            try require(audio.hasAudibleSource == hasAudibleSource, "Audible source summary is incorrect")
+            try require((audio.warningText == nil) == hasAudibleSource, "Silence warning must require both sources muted")
+            try require(audio.recordingText == fixture.recordingText, "Recording text misidentifies enabled sources")
+
+            for hasAPIKey in [true, false] {
+                let recording = AppStatus(phase: .recording, audio: audio, hasAPIKey: hasAPIKey)
+                try require(recording.statusText == fixture.recordingText, "Recording status was hidden by another setting")
+                try require(recording.symbolName == "record.circle.fill", "Recording must retain its recording symbol")
+                try require(recording.tone == .recording, "Muting must not hide ongoing recording")
+                try require(recording.menuBarActivitySymbolName == "record.circle.fill", "Recording badge is missing")
+                try require(recording.menuBarAudioSymbolName == fixture.recordingAudioSymbol, "Recording audio badge is incorrect")
+                try require(recording.menuBarHelp.contains(audio.summary), "Recording tooltip must describe both sources")
+
+                let idle = AppStatus(phase: .idle, audio: audio, hasAPIKey: hasAPIKey)
+                let idleAudioSymbol = hasAudibleSource
+                    ? fixture.recordingAudioSymbol
+                    : hasAPIKey ? nil : "speaker.slash.fill"
+                try require(idle.menuBarAudioSymbolName == idleAudioSymbol, "Idle audio badge is incorrect")
+                try require(idle.menuBarHelp.contains(audio.summary), "Idle tooltip must describe both sources")
+                try require(idle.menuBarHelp.hasPrefix("Transcribator — "), "Menu bar tooltip lacks app name")
+                if !hasAPIKey {
+                    try require(idle.statusText == "Добавьте OpenAI API key", "Missing API key must be actionable")
+                    try require(idle.menuBarActivitySymbolName == "key.fill", "Missing API key badge is incorrect")
+                    try require(idle.tone == .warning, "Missing API key must use a warning tone")
+                } else if hasAudibleSource {
+                    try require(idle.statusText == "Готов к записи", "Ready status is incorrect")
+                    try require(idle.menuBarActivitySymbolName == nil, "Ready app does not need an activity badge")
+                    try require(idle.tone == .neutral, "Ready status must be neutral")
+                } else {
+                    try require(idle.statusText == "Нет звука для записи", "Silent setup must not say ready")
+                    try require(idle.menuBarActivitySymbolName == "exclamationmark.triangle.fill", "Silent setup warning badge is missing")
+                    try require(idle.tone == .warning, "Silent setup must use a warning tone")
+                }
+
+                for operation in operationFixtures {
+                    let status = AppStatus(phase: operation.phase, audio: audio, hasAPIKey: hasAPIKey)
+                    try require(status.statusText == operation.text, "An audio or API setting hid the operation status")
+                    try require(status.symbolName == operation.symbol, "An audio or API setting hid the operation symbol")
+                    try require(status.tone == operation.tone, "An audio or API setting changed the operation tone")
+                    try require(status.menuBarActivitySymbolName == operation.symbol, "Operation menu bar badge is incorrect")
+                    try require(status.menuBarAudioSymbolName == nil, "Audio preferences must not appear as current activity during processing or results")
+                    try require(status.menuBarHelp == "Transcribator — \(operation.text)", "Operation tooltip includes irrelevant source controls")
+                }
+            }
+        }
+
+        let microphoneOnly = AppStatus(phase: .recording, audio: fixtures[3].audio, hasAPIKey: true)
+        let silentRecording = AppStatus(phase: .recording, audio: fixtures[4].audio, hasAPIKey: true)
+        try require(
+            microphoneOnly.menuBarAudioSymbolName != silentRecording.menuBarAudioSymbolName,
+            "A silent recording must be visually distinguishable from microphone-only recording"
+        )
+        try require(fixtures[0].audio.microphoneDetail == "100%", "Microphone gain percentage is incorrect")
+        try require(fixtures[0].audio.systemAudioDetail == "65%", "System gain percentage is incorrect")
+        try require(fixtures[1].audio.microphoneDetail == "Выключен", "Disabled microphone must be explicit")
+        try require(fixtures[2].audio.microphoneDetail == "Громкость 0%", "Enabled microphone at zero must be distinct from off")
+        try require(fixtures[3].audio.systemAudioDetail == "Громкость 0%", "Muted system gain must be explicit")
+        let fractional = RecordingAudioStatus(includesMicrophone: true, microphoneVolume: 0.001, systemAudioVolume: 0)
+        try require(fractional.hasAudibleSource && fractional.microphoneDetail != "0%", "An audible fractional gain must not be labelled zero")
     }
 
     private static func checkAudioQualityPolicy() throws {

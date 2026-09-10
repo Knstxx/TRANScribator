@@ -4,11 +4,21 @@ import TranscribatorCore
 
 enum ExistingFileTranscriptionRunner {
     static var isRequested: Bool {
-        CommandLine.arguments.contains("--transcribe-existing")
+        CommandLine.arguments.contains("--transcribe-existing") || CommandLine.arguments.contains("--check-gpt-app")
     }
 
     static func runAndExit() async {
         do {
+            if CommandLine.arguments.contains("--check-gpt-app") {
+                let status = await ChatGPTAppSession().checkStatus()
+                switch status {
+                case .ready: print("GPT App: существующая сессия ChatGPT доступна")
+                case .notInstalled: print("GPT App: установите приложение ChatGPT")
+                case .signInRequired: print("GPT App: войдите в приложение ChatGPT")
+                case .unavailable: print("GPT App: подключение недоступно; проверьте версию ChatGPT")
+                }
+                exit(status == .ready ? EXIT_SUCCESS : EXIT_FAILURE)
+            }
             let request = try parseRequest()
             try await transcribe(request)
             print("Транскрипт сохранён: \(request.outputURL.path)")
@@ -54,8 +64,17 @@ enum ExistingFileTranscriptionRunner {
             throw RecoveryError.outputExists(request.outputURL.path)
         }
 
-        guard let apiKey = try KeychainStore().read(), !apiKey.isEmpty else {
-            throw RecoveryError.missingAPIKey
+        let client: AudioTranscriptionRequesting
+        if request.model == .gptApp {
+            let session = ChatGPTAppSession()
+            client = ChatGPTTranscriptionClient { refresh in
+                try await session.accessToken(refresh: refresh)
+            }
+        } else {
+            guard let apiKey = try KeychainStore().read(), !apiKey.isEmpty else {
+                throw RecoveryError.missingAPIKey
+            }
+            client = OpenAITranscriptionClient(apiKey: apiKey)
         }
 
         let sessionDirectory = FileManager.default.temporaryDirectory
@@ -72,7 +91,6 @@ enum ExistingFileTranscriptionRunner {
             destinationURL: workingRecordingURL,
             quality: .standard
         )
-        let client = OpenAITranscriptionClient(apiKey: apiKey)
         let transcript = try await AudioTranscriptionPipeline().transcribe(
             audioURL: workingRecordingURL,
             model: request.model,

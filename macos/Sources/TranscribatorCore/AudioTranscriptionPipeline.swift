@@ -17,6 +17,7 @@ public enum AudioTranscriptionProgress: Equatable, Sendable {
 
 public final class AudioTranscriptionPipeline: @unchecked Sendable {
     private let chunker: AudioChunker
+    private let chatGPTChunker = AudioChunker(policy: .gptApp)
 
     public init(chunker: AudioChunker = AudioChunker()) {
         self.chunker = chunker
@@ -32,7 +33,8 @@ public final class AudioTranscriptionPipeline: @unchecked Sendable {
     ) async throws -> String {
         try Task.checkCancellation()
         await progress?(.preparingUploads)
-        let uploadFiles = try await chunker.uploadFiles(for: audioURL, quality: quality)
+        let selectedChunker = model == .gptApp ? chatGPTChunker : chunker
+        let uploadFiles = try await selectedChunker.uploadFiles(for: audioURL, quality: quality)
 
         var results: [String] = []
         for (index, fileURL) in uploadFiles.enumerated() {

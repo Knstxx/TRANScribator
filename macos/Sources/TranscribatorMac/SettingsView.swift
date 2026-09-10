@@ -11,6 +11,10 @@ struct SettingsView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
+                chatGPTConnection
+
+                Divider()
+
                 Text("OpenAI API")
                     .font(.headline)
 
@@ -23,16 +27,18 @@ struct SettingsView: View {
                     Spacer()
                     if state.hasAPIKey {
                         Button("Удалить", role: .destructive) { deleteAPIKey() }
+                            .disabled(state.isRecording || state.isBusy)
                     }
                 }
 
                 SecureField(state.hasAPIKey ? "Новый ключ для замены" : "sk-…", text: $apiKeyDraft)
                     .textFieldStyle(.roundedBorder)
+                    .disabled(state.isRecording || state.isBusy)
 
                 Button(state.hasAPIKey ? "Заменить API key" : "Сохранить API key") {
                     saveAPIKey()
                 }
-                .disabled(apiKeyDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .disabled(state.isRecording || state.isBusy || apiKeyDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
 
                 Divider()
 
@@ -50,27 +56,6 @@ struct SettingsView: View {
                 .disabled(state.isRecording || state.isBusy)
 
                 Text(state.selectedAudioQuality.detail)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-
-                Divider()
-
-                Text("Громкость дорожек")
-                    .font(.headline)
-
-                volumeSlider(
-                    title: "Мой голос",
-                    systemImage: "mic.fill",
-                    value: $state.microphoneVolume
-                )
-
-                volumeSlider(
-                    title: "Остальной звук",
-                    systemImage: "speaker.wave.2.fill",
-                    value: $state.systemAudioVolume
-                )
-
-                Text("Новое значение применяется с момента изменения. При 1.00 на обеих громких дорожках возможен перегруз.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
 
@@ -110,22 +95,21 @@ struct SettingsView: View {
         .frame(height: 460)
     }
 
-    @ViewBuilder
-    private func volumeSlider(
-        title: String,
-        systemImage: String,
-        value: Binding<Double>
-    ) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack {
-                Label(title, systemImage: systemImage)
-                Spacer()
-                Text(value.wrappedValue, format: .number.precision(.fractionLength(2)))
-                    .font(.system(.body, design: .monospaced))
-                    .foregroundStyle(.secondary)
-                    .monospacedDigit()
+    private var chatGPTConnection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("GPT App · ChatGPT")
+                .font(.headline)
+            Label(state.chatGPTStatusText, systemImage: state.chatGPTStatus == .ready ? "checkmark.circle.fill" : "person.crop.circle")
+                .font(.caption)
+                .foregroundStyle(state.chatGPTStatus == .ready ? .green : .secondary)
+            Text("Используется текущий вход ChatGPT на этом Mac. API key для GPT App не нужен.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            if state.chatGPTStatus == .notInstalled || state.chatGPTStatus == .unavailable {
+                Link("Установить / обновить ChatGPT", destination: URL(string: "https://chatgpt.com/download")!)
             }
-            Slider(value: value, in: 0 ... 1, step: 0.05)
+            Button("Проверить подключение") { state.refreshChatGPTStatus(manual: true) }
+                .disabled(state.isRecording || state.isBusy || state.isCheckingChatGPT)
         }
     }
 

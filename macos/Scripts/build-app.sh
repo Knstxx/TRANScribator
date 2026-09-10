@@ -48,6 +48,8 @@ lipo -create \
     -output "$executable_dir/TranscribatorMac"
 cp "$package_dir/Resources/Info.plist" "$contents_dir/Info.plist"
 cp "$package_dir/THIRD_PARTY_NOTICES.md" "$resources_dir/THIRD_PARTY_NOTICES.md"
+icon_path=$("$script_dir/build-icon.sh")
+cp "$icon_path" "$resources_dir/AppIcon.icns"
 
 signing_identity=${TRANSCRIBATOR_SIGNING_IDENTITY:--}
 if [[ "$signing_identity" == "-" ]]; then

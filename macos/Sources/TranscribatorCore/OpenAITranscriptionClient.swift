@@ -28,6 +28,7 @@ public final class OpenAITranscriptionClient: @unchecked Sendable {
         prompt: String? = nil
     ) async throws -> String {
         try Task.checkCancellation()
+        guard model.requiresAPIKey else { throw OpenAIError.unsupportedModel }
         let fileData = try Data(contentsOf: fileURL, options: .mappedIfSafe)
         try Task.checkCancellation()
         let multipart = MultipartFormData()
@@ -157,12 +158,15 @@ public enum TranscriptionResponseParser {
 }
 
 public enum OpenAIError: LocalizedError {
+    case unsupportedModel
     case invalidResponse
     case retryable(status: Int)
     case api(status: Int, message: String)
 
     public var errorDescription: String? {
         switch self {
+        case .unsupportedModel:
+            "GPT App требует подключения ChatGPT в настройках"
         case .invalidResponse:
             "OpenAI вернул неизвестный ответ"
         case .retryable(let status):

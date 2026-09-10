@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 import TranscribatorCore
 
@@ -8,19 +9,42 @@ struct MenuBarContentView: View {
     @State private var confirmingRecordingCancellation = false
 
     var body: some View {
+        FittingMenuScrollView { panel }
+    }
+
+    private var panel: some View {
         VStack(alignment: .leading, spacing: 14) {
-            header
+            AppStatusHeader(status: state.status, icon: AppBranding.appIcon, startedAt: state.startedAt)
             Divider()
             modelPicker
-            microphoneToggle
+            if !state.canSelectGPTApp && !state.isCheckingChatGPT {
+                Text("GPT App: \(state.chatGPTStatusText)")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            }
+            RecordingAudioControls(
+                audio: state.audioStatus,
+                microphoneEnabled: Binding(
+                    get: { !state.audioStatus.isMicrophoneMuted },
+                    set: state.setMicrophoneEnabled
+                ),
+                systemAudioEnabled: Binding(
+                    get: { !state.audioStatus.isSystemAudioMuted },
+                    set: state.setSystemAudioEnabled
+                ),
+                microphoneVolume: $state.microphoneVolume,
+                systemAudioVolume: $state.systemAudioVolume,
+                isRecording: state.isRecording,
+                isBusy: state.isBusy
+            )
             recordButton
             if state.isRecording {
                 recordingCancellationSection
             } else {
                 fileTranscriptionSection
             }
-            if !state.hasAPIKey {
-                Label("Добавьте OpenAI API key в настройках", systemImage: "key")
+            if let message = state.authorizationRequiredMessage {
+                Label(message, systemImage: "key")
                     .font(.caption)
                     .foregroundStyle(.orange)
             }
@@ -76,75 +100,40 @@ struct MenuBarContentView: View {
         }
         .padding(16)
         .frame(width: 390)
+        .onAppear { state.refreshChatGPTStatus() }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            state.refreshChatGPTStatus()
+        }
         .onChange(of: state.isRecording) { _, isRecording in
             if !isRecording { confirmingRecordingCancellation = false }
-        }
-    }
-
-    private var header: some View {
-        HStack(alignment: .top) {
-            Image(systemName: state.iconName)
-                .font(.title2)
-                .foregroundStyle(state.isRecording ? .red : .primary)
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Transcribator")
-                    .font(.headline)
-                Text(state.statusText)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(3)
-                if let startedAt = state.startedAt {
-                    TimelineView(.periodic(from: .now, by: 1)) { context in
-                        Text(elapsed(from: startedAt, to: context.date))
-                            .font(.system(.title3, design: .monospaced))
-                            .foregroundStyle(.red)
-                    }
-                }
-            }
-            Spacer()
         }
     }
 
     private var modelPicker: some View {
         Picker("Модель", selection: $state.selectedModel) {
             ForEach(TranscriptionModel.allCases) { model in
-                Text(model.title).tag(model)
+                Text(model == .gptApp && !state.canSelectGPTApp
+                     ? "GPT App · недоступно" : model.title).tag(model)
+                    .disabled(model == .gptApp && !state.canSelectGPTApp)
+                    .help(model == .gptApp ? state.chatGPTStatusText : model.title)
             }
         }
         .pickerStyle(.menu)
         .disabled(state.isRecording || state.isBusy)
     }
 
-    private var microphoneToggle: some View {
-        Toggle(isOn: $state.includesMicrophone) {
-            Label(
-                microphoneLabel,
-                systemImage: state.isMicrophoneMuted ? "mic.slash.fill" : "mic.fill"
-            )
-        }
-        .toggleStyle(.switch)
-        .disabled(state.isBusy)
-        .help("Добавлять ваш голос с микрофона в запись")
-    }
-
-    private var microphoneLabel: String {
-        if !state.includesMicrophone { return "Микрофон выключен" }
-        if state.microphoneVolume == 0 { return "Микрофон включён · громкость 0" }
-        return "Микрофон включён"
-    }
-
     private var recordButton: some View {
         Button(action: state.toggleRecording) {
             Label(
-                state.isRecording ? "Остановить и транскрибировать" : "Начать запись",
-                systemImage: state.isRecording ? "stop.fill" : "record.circle"
+                state.isRecording ? "Остановить и транскрибировать" : state.isBusy ? "Обработка…" : "Начать запись",
+                systemImage: state.isRecording ? "stop.fill" : state.isBusy ? "arrow.triangle.2.circlepath" : "record.circle"
             )
             .frame(maxWidth: .infinity)
             .padding(.vertical, 8)
         }
         .buttonStyle(.borderedProminent)
         .tint(state.isRecording ? .red : .accentColor)
-        .disabled(state.isBusy)
+        .disabled(state.isBusy || (!state.isRecording && (!state.canUseSelectedModel || !state.audioStatus.hasAudibleSource)))
     }
 
     @ViewBuilder
@@ -241,7 +230,9 @@ struct MenuBarContentView: View {
                         .textFieldStyle(.roundedBorder)
                         .disabled(state.isFileTranscribing)
                     } else {
-                        Text("Для модели с разделением по говорящим контекст не поддерживается.")
+                        Text(state.selectedModel == .gptApp
+                            ? "GPT App распознаёт речь автоматически; дополнительный контекст не поддерживается."
+                            : "Для модели с разделением по говорящим контекст не поддерживается.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
@@ -270,7 +261,7 @@ struct MenuBarContentView: View {
                                 .padding(.vertical, 5)
                         }
                         .buttonStyle(.borderedProminent)
-                        .disabled(state.isBusy || !state.hasAPIKey)
+                        .disabled(state.isBusy || !state.canUseSelectedModel)
                     }
                 } else {
                     Text("Поддерживаются аудио и видео, которые открывает macOS. Видеодорожка никуда не загружается.")
@@ -316,8 +307,4 @@ struct MenuBarContentView: View {
         return String(format: "%d:%02d", total / 60, total % 60)
     }
 
-    private func elapsed(from start: Date, to end: Date) -> String {
-        let seconds = max(0, Int(end.timeIntervalSince(start)))
-        return String(format: "%02d:%02d:%02d", seconds / 3600, (seconds / 60) % 60, seconds % 60)
-    }
 }

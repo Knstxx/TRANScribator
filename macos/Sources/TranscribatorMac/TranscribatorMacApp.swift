@@ -1,4 +1,5 @@
 import SwiftUI
+import TranscribatorCore
 
 @main
 struct TranscribatorMacApp: App {
@@ -17,15 +18,22 @@ struct TranscribatorMacApp: App {
             MenuBarContentView()
                 .environmentObject(state)
         } label: {
-            if state.isMicrophoneMuted {
-                Image(systemName: "waveform.badge.xmark")
-                    .symbolRenderingMode(.monochrome)
-                    .foregroundStyle(.red)
-            } else {
-                Image(systemName: state.iconName)
-                    .symbolRenderingMode(state.isRecording ? .multicolor : .monochrome)
-            }
+            MenuBarStatusLabel(status: state.status)
         }
         .menuBarExtraStyle(.window)
+    }
+}
+
+private struct MenuBarStatusLabel: View {
+    @Environment(\.colorScheme) private var colorScheme
+    let status: AppStatus
+
+    var body: some View {
+        let icon = AppBranding.menuBarIcon(for: status, isDarkAppearance: colorScheme == .dark)
+        Image(nsImage: icon)
+            .renderingMode(icon.isTemplate ? .template : .original)
+            .accessibilityLabel(status.menuBarHelp)
+            .accessibilityIdentifier("TranscribatorMenuBarStatus")
+            .help(status.menuBarHelp)
     }
 }

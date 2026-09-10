@@ -1,6 +1,8 @@
 # Transcribator
 
-Transcribator is a native macOS menu-bar app that records system audio and microphone input, then sends the result to the official OpenAI Transcriptions API. Optional Telegram and Discord integrations are included in the same repository.
+<img src="macos/Resources/AppIcon.png" alt="Transcribator app icon: audio waveform and transcript lines" width="96" height="96">
+
+Transcribator is a native macOS menu-bar app that records system audio and microphone input, then transcribes it through the OpenAI Transcriptions API or an existing ChatGPT app session. Optional Telegram and Discord integrations are included in the same repository.
 
 ## Features
 
@@ -9,22 +11,22 @@ Transcribator is a native macOS menu-bar app that records system audio and micro
 - Cancels an active recording without saving audio, creating a transcript, or calling the API.
 - Transcribes an existing audio or video file after extracting and compressing only its audio track locally.
 - Saves transcripts as TXT and, optionally, recordings as M4A.
-- Supports `gpt-transcribe`, `gpt-4o-transcribe-diarize`, and `whisper-1`.
+- Supports `gpt-transcribe`, `gpt-4o-transcribe-diarize`, `whisper-1`, and **GPT App**. GPT App uses the installed ChatGPT app’s existing session, without a separate API key or sign-in flow.
 - Splits long audio automatically and cleans up working files.
 
 ## Quick start on macOS
 
-Requirements: macOS 15 or later and your own OpenAI API key.
+Requirements: macOS 15 or later, plus an OpenAI API key for the first three models or a compatible installed ChatGPT app with an active session for GPT App.
 
-1. Download the Universal DMG from [Releases](../../releases).
+1. Download the current **0.2.0** Universal DMG or ZIP from [Releases](https://github.com/Knstxx/TRANScribator/releases/tag/v0.2.0).
 2. Drag **Transcribator** to **Applications**.
 3. Open it; the app appears in the menu bar, not in the Dock.
-4. Open **Settings**, save the OpenAI API key, and choose output folders.
+4. Open **Settings**, check the ChatGPT connection or save an OpenAI API key, and choose output folders.
 5. Allow **Microphone** and **Screen & System Audio Recording** when macOS asks, then restart the app.
 
 Use **Transcribe file** in the menu to select an audio or video file. The source stays unchanged, video is not uploaded, and the resulting TXT is saved in the configured transcripts folder.
 
-The API key is stored in macOS Keychain. Audio is sent to `https://api.openai.com/v1/audio/transcriptions`; it is not uploaded anywhere else by the macOS app.
+The API key is stored in macOS Keychain. API models send audio to `https://api.openai.com/v1/audio/transcriptions`. GPT App uses `https://chatgpt.com/backend-api/transcribe`, a private ChatGPT interface whose compatibility and limits may change. Its session token stays in memory and redirects are blocked. GPT App is disabled if the app or session is unavailable; sign in through ChatGPT itself. See [connection details](macos/README.md#gpt-app-текущая-сессия-chatgpt).
 
 ### First launch of an unsigned build
 
@@ -69,6 +71,8 @@ cd recorder && npm ci && node --check index.js && npm audit --omit=dev
 
 # macOS
 swift run --package-path macos TranscribatorCoreChecks
+macos/Scripts/check-gpt-app-session.sh
+macos/Scripts/check-status-ui.sh
 macos/Scripts/package-distribution.sh
 ```
 

@@ -7,18 +7,13 @@ import UniformTypeIdentifiers
 
 @MainActor
 final class AppState: ObservableObject {
-    enum Phase: Equatable {
-        case idle
-        case recording
-        case processing(String)
-        case done(copied: Bool)
-        case cancelled(String)
-        case failed(String)
-    }
+    typealias Phase = TranscriptionPhase
 
     @Published private(set) var phase: Phase = .idle
     @Published private(set) var startedAt: Date?
     @Published private(set) var hasAPIKey = false
+    @Published private(set) var chatGPTStatus: ChatGPTAppStatus = .unavailable
+    @Published private(set) var isCheckingChatGPT = true
     @Published private(set) var lastTranscriptURL: URL?
     @Published private(set) var lastRecordingURL: URL?
     @Published private(set) var selectedMediaFile: MediaFileInfo?
@@ -54,17 +49,28 @@ final class AppState: ObservableObject {
     @Published var microphoneVolume: Double {
         didSet {
             UserDefaults.standard.set(microphoneVolume, forKey: Self.microphoneVolumeKey)
+            if microphoneVolume > 0 {
+                lastMicrophoneVolume = microphoneVolume
+                UserDefaults.standard.set(microphoneVolume, forKey: Self.lastMicrophoneVolumeKey)
+            }
             recordVolumeChange(microphone: true)
         }
     }
     @Published var systemAudioVolume: Double {
         didSet {
             UserDefaults.standard.set(systemAudioVolume, forKey: Self.systemAudioVolumeKey)
+            if systemAudioVolume > 0 {
+                lastSystemAudioVolume = systemAudioVolume
+                UserDefaults.standard.set(systemAudioVolume, forKey: Self.lastSystemAudioVolumeKey)
+            }
             recordVolumeChange(microphone: false)
         }
     }
     @Published var selectedModel: TranscriptionModel {
-        didSet { UserDefaults.standard.set(selectedModel.rawValue, forKey: "transcriptionModel") }
+        didSet {
+            UserDefaults.standard.set(selectedModel.rawValue, forKey: "transcriptionModel")
+            if !isRecording && !isBusy { phase = .idle }
+        }
     }
 
     private let capture = AudioCaptureSession()
@@ -72,6 +78,9 @@ final class AppState: ObservableObject {
     private let mediaPreparer = MediaFilePreparer()
     private let transcriptionPipeline = AudioTranscriptionPipeline()
     private let keychain = KeychainStore()
+    private let chatGPTSession = ChatGPTAppSession()
+    private var chatGPTCheckTask: Task<Void, Never>?
+    private var chatGPTSessionRejected = false
     private var sessionDirectory: URL?
     private var sessionFileStem: String?
     private var sessionAudioQuality: AudioQuality?
@@ -80,6 +89,8 @@ final class AppState: ObservableObject {
     private var systemVolumePoints: [AudioVolumePoint] = []
     private var fileTranscriptionTask: Task<Void, Never>?
     private var mediaInspectionTask: Task<Void, Never>?
+    private var lastMicrophoneVolume: Double = 1
+    private var lastSystemAudioVolume: Double = 0.65
 
     private static let audioDirectoryKey = "audioDirectory"
     private static let transcriptsDirectoryKey = "transcriptsDirectory"
@@ -89,6 +100,8 @@ final class AppState: ObservableObject {
     private static let includesMicrophoneKey = "includesMicrophone"
     private static let microphoneVolumeKey = "microphoneVolume"
     private static let systemAudioVolumeKey = "systemAudioVolume"
+    private static let lastMicrophoneVolumeKey = "lastMicrophoneVolume"
+    private static let lastSystemAudioVolumeKey = "lastSystemAudioVolume"
     private static let minimumVolumePointInterval: TimeInterval = 0.05
 
     init() {
@@ -122,43 +135,113 @@ final class AppState: ObservableObject {
             forKey: Self.systemAudioVolumeKey,
             defaultValue: 0.65
         )
+        lastMicrophoneVolume = microphoneVolume > 0 ? microphoneVolume : max(0.05, Self.savedCoefficient(
+            forKey: Self.lastMicrophoneVolumeKey,
+            defaultValue: 1
+        ))
+        lastSystemAudioVolume = systemAudioVolume > 0 ? systemAudioVolume : max(0.05, Self.savedCoefficient(
+            forKey: Self.lastSystemAudioVolumeKey,
+            defaultValue: 0.65
+        ))
         if CaptureSmokeRunner.isRequested || ExistingFileTranscriptionRunner.isRequested {
             hasAPIKey = false
         } else {
             hasAPIKey = (try? keychain.containsValue()) == true
             Self.removeStaleWorkingFiles()
+            refreshChatGPTStatus()
         }
     }
 
     var isRecording: Bool { phase == .recording }
     var isBusy: Bool { if case .processing = phase { true } else { false } }
-    var isMicrophoneMuted: Bool { !includesMicrophone || microphoneVolume == 0 }
+    var audioStatus: RecordingAudioStatus {
+        RecordingAudioStatus(
+            includesMicrophone: includesMicrophone,
+            microphoneVolume: microphoneVolume,
+            systemAudioVolume: systemAudioVolume
+        )
+    }
 
-    var statusText: String {
-        switch phase {
-        case .idle: "Готов"
-        case .recording:
-            !isMicrophoneMuted
-                ? "Запись системного звука и микрофона"
-                : "Запись только системного звука"
-        case .processing(let text): text
-        case .done(let copied):
-            copied ? "Транскрипция готова и скопирована" : "Транскрипция готова"
-        case .cancelled(let text): text
-        case .failed(let message): message
+    var status: AppStatus {
+        AppStatus(phase: phase, audio: audioStatus, authorizationRequiredMessage: authorizationRequiredMessage)
+    }
+
+    var canUseSelectedModel: Bool {
+        selectedModel.requiresAPIKey ? hasAPIKey : chatGPTStatus == .ready && !isCheckingChatGPT
+    }
+
+    var canSelectGPTApp: Bool {
+        !isCheckingChatGPT && chatGPTStatus == .ready
+    }
+
+    var chatGPTStatusText: String {
+        if isCheckingChatGPT { return "Проверка подключения ChatGPT…" }
+        switch chatGPTStatus {
+        case .ready: return "Подключена текущая сессия ChatGPT"
+        case .notInstalled: return "Установите ChatGPT, чтобы использовать GPT App"
+        case .signInRequired: return "Войдите в приложение ChatGPT и проверьте подключение"
+        case .unavailable: return "Обновите ChatGPT: подключение GPT App недоступно"
         }
     }
 
-    var iconName: String {
-        switch phase {
-        case .recording:
-            isMicrophoneMuted ? "waveform.badge.xmark" : "record.circle.fill"
-        case .processing: "waveform.badge.magnifyingglass"
-        case .done: "checkmark.circle"
-        case .cancelled: "xmark.circle"
-        case .failed: "exclamationmark.triangle"
-        case .idle: "waveform"
+    var authorizationRequiredMessage: String? {
+        guard !canUseSelectedModel else { return nil }
+        return selectedModel.requiresAPIKey ? "Добавьте OpenAI API key" : chatGPTStatusText
+    }
+
+    func refreshChatGPTStatus(manual: Bool = false) {
+        guard manual || !chatGPTSessionRejected else { return }
+        guard chatGPTCheckTask == nil, !isRecording, !isBusy else { return }
+        isCheckingChatGPT = true
+        chatGPTCheckTask = Task { [weak self] in
+            guard let self else { return }
+            self.chatGPTStatus = await self.chatGPTSession.checkStatus()
+            if manual { self.chatGPTSessionRejected = false }
+            self.isCheckingChatGPT = false
+            self.chatGPTCheckTask = nil
         }
+    }
+
+    private func makeTranscriptionClient(for model: TranscriptionModel) throws -> AudioTranscriptionRequesting {
+        if model == .gptApp {
+            let session = chatGPTSession
+            return ChatGPTTranscriptionClient { refresh in
+                try await session.accessToken(refresh: refresh)
+            }
+        }
+        guard let key = try keychain.read(), !key.isEmpty else {
+            hasAPIKey = false
+            throw AppStateError.missingAPIKey
+        }
+        return OpenAITranscriptionClient(apiKey: key)
+    }
+
+    private func updateChatGPTAfterFailure(_ error: Error, model: TranscriptionModel) {
+        guard model == .gptApp else { return }
+        if case ChatGPTTranscriptionError.authorizationRequired = error {
+            chatGPTStatus = .signInRequired
+            chatGPTSessionRejected = true
+        } else if case ChatGPTAppSessionError.signInRequired = error {
+            chatGPTStatus = .signInRequired
+            chatGPTSessionRejected = true
+        } else if case ChatGPTTranscriptionError.applicationMissing = error {
+            chatGPTStatus = .notInstalled
+        } else if case ChatGPTTranscriptionError.sessionUnavailable = error {
+            chatGPTStatus = .unavailable
+        }
+    }
+
+    func setMicrophoneEnabled(_ enabled: Bool) {
+        guard !isBusy else { return }
+        if enabled, microphoneVolume == 0 {
+            microphoneVolume = lastMicrophoneVolume
+        }
+        includesMicrophone = enabled
+    }
+
+    func setSystemAudioEnabled(_ enabled: Bool) {
+        guard !isBusy else { return }
+        systemAudioVolume = enabled ? lastSystemAudioVolume : 0
     }
 
     func saveAPIKey(_ value: String) throws {
@@ -277,21 +360,16 @@ final class AppState: ObservableObject {
               !isRecording,
               !isBusy,
               !isInspectingMediaFile else { return }
-        guard hasAPIKey else {
-            phase = .failed("Сначала сохраните OpenAI API key")
+        guard canUseSelectedModel else {
+            phase = .failed(authorizationRequiredMessage ?? "Подключите выбранную модель")
             return
         }
 
-        let apiKey: String
+        let client: AudioTranscriptionRequesting
         do {
-            guard let value = try keychain.read(), !value.isEmpty else {
-                hasAPIKey = false
-                phase = .failed(AppStateError.missingAPIKey.localizedDescription)
-                return
-            }
-            apiKey = value
+            client = try makeTranscriptionClient(for: selectedModel)
         } catch {
-            phase = .failed("Не удалось прочитать API key: \(error.localizedDescription)")
+            phase = .failed(error.localizedDescription)
             return
         }
 
@@ -321,7 +399,7 @@ final class AppState: ObservableObject {
                 media: media,
                 directory: session.directory,
                 fileStem: session.fileStem,
-                apiKey: apiKey,
+                client: client,
                 model: model,
                 quality: quality,
                 initialPrompt: prompt,
@@ -342,7 +420,7 @@ final class AppState: ObservableObject {
         media: MediaFileInfo,
         directory: URL,
         fileStem: String,
-        apiKey: String,
+        client: AudioTranscriptionRequesting,
         model: TranscriptionModel,
         quality: AudioQuality,
         initialPrompt: String,
@@ -364,7 +442,6 @@ final class AppState: ObservableObject {
             )
             try Task.checkCancellation()
 
-            let client = OpenAITranscriptionClient(apiKey: apiKey)
             let transcript = try await transcriptionPipeline.transcribe(
                 audioURL: preparedAudioURL,
                 quality: quality,
@@ -419,6 +496,7 @@ final class AppState: ObservableObject {
             }
         } catch {
             let operationError = error
+            updateChatGPTAfterFailure(operationError, model: model)
             do {
                 try Self.removeWorkingSession(at: directory)
                 phase = .failed(operationError.localizedDescription)
@@ -434,24 +512,28 @@ final class AppState: ObservableObject {
         if isRecording {
             stopRecording()
         } else if !isBusy {
+            guard audioStatus.hasAudibleSource else {
+                phase = .failed("Включите хотя бы один источник звука перед записью")
+                return
+            }
             phase = .processing("Подготовка записи…")
             Task { await startRecording() }
         }
     }
 
     private func startRecording() async {
-        guard hasAPIKey else {
-            phase = .failed("Сначала сохраните OpenAI API key")
-            return
-        }
         do {
-            guard try keychain.read()?.isEmpty == false else {
-                hasAPIKey = false
-                phase = .failed(AppStateError.missingAPIKey.localizedDescription)
-                return
+            if selectedModel == .gptApp {
+                chatGPTStatus = await chatGPTSession.checkStatus()
+                guard chatGPTStatus == .ready else {
+                    phase = .failed(chatGPTStatusText)
+                    return
+                }
+            } else {
+                _ = try makeTranscriptionClient(for: selectedModel)
             }
         } catch {
-            phase = .failed("Не удалось прочитать API key: \(error.localizedDescription)")
+            phase = .failed(error.localizedDescription)
             return
         }
         let shouldEnableMicrophone = includesMicrophone
@@ -558,10 +640,7 @@ final class AppState: ObservableObject {
                     lastRecordingURL = nil
                 }
 
-                guard let key = try keychain.read(), !key.isEmpty else {
-                    throw AppStateError.missingAPIKey
-                }
-                let client = OpenAITranscriptionClient(apiKey: key)
+                let client = try makeTranscriptionClient(for: model)
                 let transcript = try await transcriptionPipeline.transcribe(
                     audioURL: workingRecordingURL,
                     quality: audioQuality,
@@ -595,6 +674,7 @@ final class AppState: ObservableObject {
                 phase = .done(copied: shouldCopyTranscript)
                 notifyFinished(copied: shouldCopyTranscript)
             } catch {
+                updateChatGPTAfterFailure(error, model: model)
                 phase = .failed(error.localizedDescription)
             }
         }

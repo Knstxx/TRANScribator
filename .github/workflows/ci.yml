@@ -2,6 +2,7 @@ name: CI
 
 on:
   push:
+    branches: ["**"]
   pull_request:
 
 permissions:
@@ -44,3 +45,5 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: swift run --package-path macos TranscribatorCoreChecks
+      - run: macos/Scripts/check-gpt-app-session.sh
+      - run: macos/Scripts/check-status-ui.sh
