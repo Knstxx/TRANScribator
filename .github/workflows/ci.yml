@@ -12,8 +12,8 @@ jobs:
   python:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
           cache: pip
@@ -30,10 +30,10 @@ jobs:
       run:
         working-directory: recorder
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
         with:
-          node-version: "22.12"
+          node-version: "22"
           cache: npm
           cache-dependency-path: recorder/package-lock.json
       - run: npm ci
@@ -43,7 +43,7 @@ jobs:
   macos:
     runs-on: macos-15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - run: swift run --package-path macos TranscribatorCoreChecks
       - run: macos/Scripts/check-gpt-app-session.sh
       - run: macos/Scripts/check-status-ui.sh
