@@ -217,6 +217,8 @@ struct FittingMenuScrollView<Content: View>: View {
         }
         .scrollBounceBehavior(.basedOnSize)
         .frame(width: 390, height: min(contentHeight, maximumHeight))
+        .background(Color(nsColor: .windowBackgroundColor))
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         .onPreferenceChange(MenuContentHeightKey.self) { height in
             if height > 0, abs(contentHeight - height) > 0.5 { contentHeight = height }
         }

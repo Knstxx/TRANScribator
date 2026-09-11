@@ -9,90 +9,86 @@ struct SettingsView: View {
     @State private var feedbackIsError = false
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 14) {
-                chatGPTConnection
+        VStack(alignment: .leading, spacing: 14) {
+            chatGPTConnection
 
-                Divider()
+            Divider()
 
-                Text("OpenAI API")
-                    .font(.headline)
+            Text("OpenAI API")
+                .font(.headline)
 
-                HStack {
-                    Label(
-                        state.hasAPIKey ? "API key сохранён в Keychain" : "API key не добавлен",
-                        systemImage: state.hasAPIKey ? "checkmark.circle.fill" : "key"
-                    )
-                    .foregroundStyle(state.hasAPIKey ? .green : .secondary)
-                    Spacer()
-                    if state.hasAPIKey {
-                        Button("Удалить", role: .destructive) { deleteAPIKey() }
-                            .disabled(state.isRecording || state.isBusy)
-                    }
-                }
-
-                SecureField(state.hasAPIKey ? "Новый ключ для замены" : "sk-…", text: $apiKeyDraft)
-                    .textFieldStyle(.roundedBorder)
-                    .disabled(state.isRecording || state.isBusy)
-
-                Button(state.hasAPIKey ? "Заменить API key" : "Сохранить API key") {
-                    saveAPIKey()
-                }
-                .disabled(state.isRecording || state.isBusy || apiKeyDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-
-                Divider()
-
-                Text("Обработка")
-                    .font(.headline)
-
-                Toggle("Копировать готовую транскрипцию", isOn: $state.copiesTranscriptToClipboard)
-
-                Picker("Качество записи и файлов", selection: $state.selectedAudioQuality) {
-                    ForEach(AudioQuality.allCases) { quality in
-                        Text(quality.title).tag(quality)
-                    }
-                }
-                .pickerStyle(.menu)
-                .disabled(state.isRecording || state.isBusy)
-
-                Text(state.selectedAudioQuality.detail)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-
-                Divider()
-
-                Text("Сохранение")
-                    .font(.headline)
-
-                Toggle("Сохранять аудиозапись после транскрибации", isOn: $state.savesAudioRecording)
-
-                outputDirectoryRow(
-                    title: "Аудиозаписи (.m4a)",
-                    url: state.audioDirectoryURL,
-                    choose: state.chooseAudioDirectory,
-                    reset: state.resetAudioDirectory,
-                    isEnabled: state.savesAudioRecording
+            HStack {
+                Label(
+                    state.hasAPIKey ? "API key сохранён в Keychain" : "API key не добавлен",
+                    systemImage: state.hasAPIKey ? "checkmark.circle.fill" : "key"
                 )
-
-                Divider()
-
-                outputDirectoryRow(
-                    title: "Транскрипты (.txt)",
-                    url: state.transcriptsDirectoryURL,
-                    choose: state.chooseTranscriptsDirectory,
-                    reset: state.resetTranscriptsDirectory,
-                    isEnabled: true
-                )
-
-                if let feedback {
-                    Text(feedback)
-                        .font(.caption)
-                        .foregroundStyle(feedbackIsError ? .red : .secondary)
+                .foregroundStyle(state.hasAPIKey ? .green : .secondary)
+                Spacer()
+                if state.hasAPIKey {
+                    Button("Удалить", role: .destructive) { deleteAPIKey() }
+                        .disabled(state.isRecording || state.isBusy)
                 }
             }
-            .padding(.trailing, 6)
+
+            SecureField(state.hasAPIKey ? "Новый ключ для замены" : "sk-…", text: $apiKeyDraft)
+                .textFieldStyle(.roundedBorder)
+                .disabled(state.isRecording || state.isBusy)
+
+            Button(state.hasAPIKey ? "Заменить API key" : "Сохранить API key") {
+                saveAPIKey()
+            }
+            .disabled(state.isRecording || state.isBusy || apiKeyDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+
+            Divider()
+
+            Text("Обработка")
+                .font(.headline)
+
+            Toggle("Копировать готовую транскрипцию", isOn: $state.copiesTranscriptToClipboard)
+
+            Picker("Качество записи и файлов", selection: $state.selectedAudioQuality) {
+                ForEach(AudioQuality.allCases) { quality in
+                    Text(quality.title).tag(quality)
+                }
+            }
+            .pickerStyle(.menu)
+            .disabled(state.isRecording || state.isBusy)
+
+            Text(state.selectedAudioQuality.detail)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            Divider()
+
+            Text("Сохранение")
+                .font(.headline)
+
+            Toggle("Сохранять аудиозапись после транскрибации", isOn: $state.savesAudioRecording)
+
+            outputDirectoryRow(
+                title: "Аудиозаписи (.m4a)",
+                url: state.audioDirectoryURL,
+                choose: state.chooseAudioDirectory,
+                reset: state.resetAudioDirectory,
+                isEnabled: state.savesAudioRecording
+            )
+
+            Divider()
+
+            outputDirectoryRow(
+                title: "Транскрипты (.txt)",
+                url: state.transcriptsDirectoryURL,
+                choose: state.chooseTranscriptsDirectory,
+                reset: state.resetTranscriptsDirectory,
+                isEnabled: true
+            )
+
+            if let feedback {
+                Text(feedback)
+                    .font(.caption)
+                    .foregroundStyle(feedbackIsError ? .red : .secondary)
+            }
         }
-        .frame(height: 460)
     }
 
     private var chatGPTConnection: some View {

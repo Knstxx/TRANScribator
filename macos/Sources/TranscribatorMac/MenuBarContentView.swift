@@ -8,6 +8,10 @@ struct MenuBarContentView: View {
     @State private var fileSectionExpanded = false
     @State private var confirmingRecordingCancellation = false
 
+    init(settingsExpanded: Bool = false) {
+        _settingsExpanded = State(initialValue: settingsExpanded)
+    }
+
     var body: some View {
         FittingMenuScrollView { panel }
     }
@@ -142,7 +146,7 @@ struct MenuBarContentView: View {
             VStack(alignment: .leading, spacing: 8) {
                 Text("Удалить текущую запись?")
                     .font(.subheadline.weight(.semibold))
-                Text("Аудио будет удалено, транскрибация и запрос к API не запустятся.")
+                Text("Аудио будет удалено без отправки на транскрибацию.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 HStack {
@@ -163,9 +167,10 @@ struct MenuBarContentView: View {
             } label: {
                 Label("Отменить запись", systemImage: "trash")
                     .frame(maxWidth: .infinity)
+                    .padding(.vertical, 8)
             }
             .buttonStyle(.bordered)
-            .help("Остановить запись, удалить временное аудио и не обращаться к API")
+            .help("Остановить и удалить запись без отправки на транскрибацию")
         }
     }
 

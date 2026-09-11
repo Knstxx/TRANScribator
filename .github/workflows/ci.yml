@@ -47,3 +47,4 @@ jobs:
       - run: swift run --package-path macos TranscribatorCoreChecks
       - run: macos/Scripts/check-gpt-app-session.sh
       - run: macos/Scripts/check-status-ui.sh
+      - run: macos/Scripts/check-menu-ui.sh

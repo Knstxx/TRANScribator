@@ -73,6 +73,7 @@ cd recorder && npm ci && node --check index.js && npm audit --omit=dev
 swift run --package-path macos TranscribatorCoreChecks
 macos/Scripts/check-gpt-app-session.sh
 macos/Scripts/check-status-ui.sh
+macos/Scripts/check-menu-ui.sh
 macos/Scripts/package-distribution.sh
 ```
 
