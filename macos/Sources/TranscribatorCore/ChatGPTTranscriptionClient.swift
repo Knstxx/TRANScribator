@@ -1,18 +1,71 @@
 import Foundation
+import CoreFoundation
+
+/// Bounded response metadata for an optional local diagnostic report. It contains no transcript,
+/// request headers, credentials, or audio asset values. Text sizes describe the untrimmed JSON text.
+public struct ChatGPTTranscriptionDiagnostics: Codable, Sendable {
+    public let httpStatus: Int
+    public let responseBytes: Int
+    public let textCharacters: Int?
+    public let textBytes: Int?
+    /// Known top-level field names only; unknown names are counted without being retained.
+    public let jsonFieldNames: [String]
+    public let unknownFieldCount: Int
+    public let finishReason: String?
+    public let truncated: Bool?
+    public let incomplete: Bool?
+
+    fileprivate init(httpStatus: Int, data: Data) {
+        self.httpStatus = httpStatus
+        responseBytes = data.count
+        let fields: [String: Any]?
+        if data.count <= 256 * 1_024 {
+            fields = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+        } else {
+            fields = nil
+        }
+        let text = fields?["text"] as? String
+        textCharacters = text?.count
+        textBytes = text?.utf8.count
+        // Even identifier-shaped unknown keys can contain private server data.
+        let knownFieldNames: Set<String> = [
+            "text", "asset_format", "asset_pointer", "asset_ttl", "finish_reason", "truncated",
+            "incomplete", "usage", "duration", "model", "language", "error", "message", "detail"
+        ]
+        jsonFieldNames = fields?.keys.filter { knownFieldNames.contains($0) }.sorted() ?? []
+        unknownFieldCount = (fields?.count ?? 0) - jsonFieldNames.count
+        let reason = fields?["finish_reason"] as? String
+        let knownReasons = ["stop", "length", "max_tokens", "max_output_tokens", "completed",
+                            "incomplete", "error", "cancelled", "content_filter"]
+        finishReason = reason.flatMap { knownReasons.contains($0) ? $0 : nil }
+        truncated = Self.boolean(fields?["truncated"])
+        incomplete = Self.boolean(fields?["incomplete"])
+    }
+
+    private static func boolean(_ value: Any?) -> Bool? {
+        guard let number = value as? NSNumber,
+              CFGetTypeID(number) == CFBooleanGetTypeID() else { return nil }
+        return number.boolValue
+    }
+}
 
 /// Uses the installed ChatGPT app's session without copying it into persistent storage.
 public final class ChatGPTTranscriptionClient: AudioTranscriptionRequesting, @unchecked Sendable {
     public typealias TokenProvider = @Sendable (_ refresh: Bool) async throws -> String
+    public typealias DiagnosticsHandler = @Sendable (ChatGPTTranscriptionDiagnostics) -> Void
 
     private static let endpoint = URL(string: "https://chatgpt.com/backend-api/transcribe")!
     private let tokenProvider: TokenProvider
+    private let diagnostics: DiagnosticsHandler?
     private let session: URLSession
 
     public init(
         tokenProvider: @escaping TokenProvider,
+        diagnostics: DiagnosticsHandler? = nil,
         protocolClasses: [AnyClass]? = nil
     ) {
         self.tokenProvider = tokenProvider
+        self.diagnostics = diagnostics
         let configuration = URLSessionConfiguration.ephemeral
         configuration.timeoutIntervalForRequest = 300
         configuration.timeoutIntervalForResource = 600
@@ -86,6 +139,7 @@ public final class ChatGPTTranscriptionClient: AudioTranscriptionRequesting, @un
                   http.url == Self.endpoint else {
                 throw ChatGPTTranscriptionError.invalidResponse
             }
+            diagnostics?(ChatGPTTranscriptionDiagnostics(httpStatus: http.statusCode, data: data))
             switch http.statusCode {
             case 200...299:
                 return try Self.transcript(from: data)

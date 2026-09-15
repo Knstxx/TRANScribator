@@ -28,6 +28,7 @@ struct TranscribatorCoreChecks {
         try checkGPTAppPolicy()
         try await checkChatGPTClient()
         try await GPTAppPipelineChecks.run()
+        try APIKeyStatusChecks.run()
         try checkAppStatusPolicy()
         try checkMultipartAndResponseParsing()
         try await checkCancelledRequestIsNotRetried()
@@ -40,25 +41,25 @@ struct TranscribatorCoreChecks {
         try require(!TranscriptionModel.gptApp.requiresAPIKey, "GPT App must not need an API key")
         try require(!TranscriptionModel.gptApp.supportsPrompt && !TranscriptionModel.gptApp.usesAutomaticChunking,
                     "GPT App must not send unsupported API parameters")
-        let duration = CMTime(seconds: 591, preferredTimescale: 600)
+        let duration = CMTime(seconds: 301, preferredTimescale: 600)
         try require(AudioChunkingPolicy.gptApp.chunkCount(forFileSize: 5_000_000, duration: duration) == 2,
-                    "GPT App must split audio over 9 minutes 50 seconds")
+                    "GPT App must split audio over five minutes")
         try require(AudioChunkingPolicy().chunkCount(forFileSize: 500_000, duration: duration) == 1,
                     "API chunking must remain unchanged")
         let policy = AudioChunkingPolicy.gptApp
-        for (seconds, count) in [(61.0, 1), (590.0, 1), (590.01, 2), (1180.0, 2), (1180.01, 3), (3600.0, 7)] {
+        for (seconds, count) in [(61.0, 1), (300.0, 1), (300.01, 2), (600.0, 2), (600.01, 3), (3600.0, 12)] {
             let duration = CMTime(seconds: seconds, preferredTimescale: 600)
             let ranges = policy.timeRanges(duration: duration, fileSize: 1_000_000)
             try require(ranges.count == count, "GPT App duration boundary produced the wrong number of parts")
-            try require(ranges.allSatisfy { CMTimeGetSeconds($0.duration) <= 590.001 },
-                        "GPT App chunk exceeds 9 minutes 50 seconds")
+            try require(ranges.allSatisfy { CMTimeGetSeconds($0.duration) <= 300.001 },
+                        "GPT App chunk exceeds five minutes")
             try require(abs(ranges.reduce(0) { $0 + CMTimeGetSeconds($1.duration) } - seconds) < 0.01,
                         "GPT App chunk boundaries lost audio duration")
         }
         for quality in AudioQuality.allCases {
-            let estimatedSize = Int64(quality.bitRate) * 590 / 8 + 200_000
-            try require(policy.chunkCount(forFileSize: estimatedSize, duration: CMTime(seconds: 590, preferredTimescale: 600)) == 1,
-                        "GPT App byte limit must allow 9:50 audio at every supported quality")
+            let estimatedSize = Int64(quality.bitRate) * 300 / 8 + 200_000
+            try require(policy.chunkCount(forFileSize: estimatedSize, duration: CMTime(seconds: 300, preferredTimescale: 600)) == 1,
+                        "GPT App byte limit must allow five minutes at every supported quality")
         }
         try require(policy.chunkCount(forFileSize: 24_000_001) == 2,
                     "GPT App must still enforce its upload byte limit")

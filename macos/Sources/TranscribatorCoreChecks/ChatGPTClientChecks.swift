@@ -146,6 +146,91 @@ extension TranscribatorCoreChecks {
             throw CheckFailure(description: "GPT App ignored task cancellation")
         } catch is CancellationError { }
         try require(ChatGPTFixtureURLProtocol.fixture.requests.isEmpty, "A cancelled GPT App task sent audio")
+        try await checkChatGPTDiagnostics(fileURL: audioURL)
+    }
+
+    private static func checkChatGPTDiagnostics(fileURL: URL) async throws {
+        let observed = ChatGPTDiagnosticsFixture()
+        let client = ChatGPTTranscriptionClient(
+            tokenProvider: { _ in "diagnostic-fixture-token" },
+            diagnostics: { observed.append($0) },
+            protocolClasses: [ChatGPTFixtureURLProtocol.self]
+        )
+        let secret = "private-fixture-value-must-not-appear"
+        let longText = String(repeating: "Полная строка 🙂 с концом.\n", count: 2_000) + "Последняя фраза."
+        let wireText = "  \n" + longText + "  \n"
+        let response = try JSONSerialization.data(withJSONObject: [
+            "text": wireText,
+            "asset_pointer": secret,
+            "unknown_field": secret,
+            "private_customer_Alice": "Another private key must remain hidden",
+            "finish_reason": "stop",
+            "truncated": false,
+            "incomplete": false,
+            secret: "This key is not a diagnostic identifier"
+        ])
+        try require(response.count < 256 * 1_024, "Long-text fixture must fit the response limit")
+        ChatGPTFixtureURLProtocol.fixture.reset([.response(200, response)])
+        let returned = try await client.transcribe(fileURL: fileURL, model: .gptApp)
+        try require(returned == longText, "GPT App truncated or changed a long successful transcript")
+        try require(observed.events.count == 1, "GPT App must emit one diagnostic per received response")
+        let event = observed.events[0]
+        try require(event.httpStatus == 200 && event.responseBytes == response.count,
+                    "GPT App diagnostics lost response status or size")
+        try require(event.textCharacters == wireText.count && event.textBytes == wireText.utf8.count,
+                    "GPT App diagnostics must measure untrimmed Unicode text correctly")
+        try require(event.jsonFieldNames == ["asset_pointer", "finish_reason", "incomplete", "text", "truncated"]
+                    && event.unknownFieldCount == 3,
+                    "GPT App diagnostics must retain only known field names and count unknown fields")
+        try require(event.finishReason == "stop" && event.truncated == false && event.incomplete == false,
+                    "GPT App diagnostics lost known literal completion indicators")
+        let encoded = String(decoding: try JSONEncoder().encode(event), as: UTF8.self)
+        for forbidden in [secret, "private_customer_Alice", "unknown_field", "diagnostic-fixture-token", "Последняя фраза", "Полная строка"] {
+            try require(!encoded.contains(forbidden), "GPT App diagnostics exposed transcript or secret data")
+        }
+
+        // These fields are diagnostic observations only until the internal endpoint's semantics
+        // are established; they must not silently change or discard the returned transcript.
+        ChatGPTFixtureURLProtocol.fixture.reset([.response(200, try JSONSerialization.data(withJSONObject: [
+            "text": "Ответ сохранён без изменений",
+            "finish_reason": "length", "truncated": true, "incomplete": true
+        ]))])
+        let flagged = try await client.transcribe(fileURL: fileURL, model: .gptApp)
+        try require(flagged == "Ответ сохранён без изменений", "Diagnostic flags changed the transcript")
+        let flaggedEvent = observed.events[1]
+        try require(flaggedEvent.finishReason == "length" && flaggedEvent.truncated == true && flaggedEvent.incomplete == true,
+                    "GPT App must report explicit completion indicators when present")
+        try require(flaggedEvent.unknownFieldCount == 0, "Known diagnostic fields were counted as unknown")
+
+        ChatGPTFixtureURLProtocol.fixture.reset([.response(200, try JSONSerialization.data(withJSONObject: [
+            "text": "Готово", "finish_reason": secret, "truncated": 1, "incomplete": "true"
+        ]))])
+        _ = try await client.transcribe(fileURL: fileURL, model: .gptApp)
+        let unknown = observed.events[2]
+        try require(unknown.finishReason == nil && unknown.truncated == nil && unknown.incomplete == nil,
+                    "GPT App diagnostics must reject arbitrary strings and non-boolean flags")
+        try require(!String(decoding: try JSONEncoder().encode(unknown), as: UTF8.self).contains(secret),
+                    "GPT App diagnostics leaked an unrecognized finish_reason")
+
+        let malformed = Data("not-json".utf8)
+        ChatGPTFixtureURLProtocol.fixture.reset([.response(200, malformed)])
+        try await expectChatGPTFailure(.invalidResponse) {
+            try await client.transcribe(fileURL: fileURL, model: .gptApp)
+        }
+        let invalid = observed.events[3]
+        try require(invalid.responseBytes == malformed.count && invalid.textCharacters == nil
+                    && invalid.textBytes == nil && invalid.jsonFieldNames.isEmpty && invalid.unknownFieldCount == 0,
+                    "GPT App malformed-response diagnostics must remain available and safe")
+
+        ChatGPTFixtureURLProtocol.fixture.reset([.response(403, try JSONEncoder().encode(["message": secret]))])
+        try await expectChatGPTFailure(.authorizationRequired, forbidden: [secret]) {
+            try await client.transcribe(fileURL: fileURL, model: .gptApp)
+        }
+        let rejected = observed.events[4]
+        try require(rejected.httpStatus == 403 && rejected.jsonFieldNames == ["message"]
+                    && rejected.textCharacters == nil, "GPT App must diagnose rejected HTTP responses")
+        try require(!String(decoding: try JSONEncoder().encode(rejected), as: UTF8.self).contains(secret),
+                    "GPT App rejected-response diagnostics exposed server text")
     }
 
     private static func expectChatGPTFailure(
@@ -163,6 +248,23 @@ extension TranscribatorCoreChecks {
                 try require(!String(reflecting: error).contains(secret), "GPT App retained sensitive response details in an error")
             }
         }
+    }
+}
+
+private final class ChatGPTDiagnosticsFixture: @unchecked Sendable {
+    private let lock = NSLock()
+    private var captured: [ChatGPTTranscriptionDiagnostics] = []
+
+    var events: [ChatGPTTranscriptionDiagnostics] {
+        lock.lock()
+        defer { lock.unlock() }
+        return captured
+    }
+
+    func append(_ event: ChatGPTTranscriptionDiagnostics) {
+        lock.lock()
+        defer { lock.unlock() }
+        captured.append(event)
     }
 }
 

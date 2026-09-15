@@ -11,14 +11,14 @@ enum GPTAppPipelineChecks {
         defer { try? FileManager.default.removeItem(at: directory) }
 
         let wave = directory.appendingPathComponent("synthetic-silence.wav")
-        try writeSilentWave(to: wave, seconds: 1_181)
+        try writeSilentWave(to: wave, seconds: 601)
         let recording = directory.appendingPathComponent("prepared.m4a")
         let exporter = AudioExporter()
         try await exporter.mixToM4A(sources: [wave], destination: recording)
         let original = try Data(contentsOf: recording)
         let duration = CMTimeGetSeconds(try await exporter.duration(of: recording))
 
-        // 19m41s needs three GPT App chunks at 9m50s, versus two API chunks at 10m.
+        // 10m01s needs three GPT App chunks at 5m, versus two API chunks at 10m.
         // An explicitly injected API policy must not override GPT App's policy.
         let pipeline = AudioTranscriptionPipeline(
             chunker: AudioChunker(policy: AudioChunkingPolicy(maxChunkDurationSeconds: 600))
@@ -30,12 +30,12 @@ enum GPTAppPipelineChecks {
             initialPrompt: "This context must not reach dictation",
             client: chatGPT
         )
-        try require(chatGPT.calls.count == 3, "GPT App pipeline did not use its 9m50s chunk policy")
+        try require(chatGPT.calls.count == 3, "GPT App pipeline did not use its five-minute chunk policy")
         try require(transcript == "Part 1\n\nPart 2\n\nPart 3", "GPT App chunk text order changed")
         try require(chatGPT.calls.allSatisfy { $0.model == .gptApp && $0.prompt == nil },
                     "GPT App received an API model or unsupported continuity prompt")
         try require(chatGPT.calls.allSatisfy {
-            $0.duration > 0 && $0.duration <= 590.1 && $0.bytes <= AudioChunkingPolicy.gptApp.maxUploadBytes
+            $0.duration > 0 && $0.duration <= 300.1 && $0.bytes <= AudioChunkingPolicy.gptApp.maxUploadBytes
         }, "GPT App exported chunks exceed the local duration or byte policy")
         try require(abs(chatGPT.calls.reduce(0) { $0 + $1.duration } - duration) < 0.15,
                     "GPT App chunks do not cover the original recording")

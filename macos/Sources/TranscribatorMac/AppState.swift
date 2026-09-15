@@ -11,7 +11,8 @@ final class AppState: ObservableObject {
 
     @Published private(set) var phase: Phase = .idle
     @Published private(set) var startedAt: Date?
-    @Published private(set) var hasAPIKey = false
+    @Published private(set) var apiKeyStatus: APIKeyStatus = .checking
+    @Published private(set) var isCheckingAPIKey = false
     @Published private(set) var chatGPTStatus: ChatGPTAppStatus = .unavailable
     @Published private(set) var isCheckingChatGPT = true
     @Published private(set) var lastTranscriptURL: URL?
@@ -78,6 +79,7 @@ final class AppState: ObservableObject {
     private let mediaPreparer = MediaFilePreparer()
     private let transcriptionPipeline = AudioTranscriptionPipeline()
     private let keychain = KeychainStore()
+    private var apiKeyCheckTask: Task<Void, Never>?
     private let chatGPTSession = ChatGPTAppSession()
     private var chatGPTCheckTask: Task<Void, Never>?
     private var chatGPTSessionRejected = false
@@ -143,15 +145,15 @@ final class AppState: ObservableObject {
             forKey: Self.lastSystemAudioVolumeKey,
             defaultValue: 0.65
         ))
-        if CaptureSmokeRunner.isRequested || ExistingFileTranscriptionRunner.isRequested {
-            hasAPIKey = false
-        } else {
-            hasAPIKey = (try? keychain.containsValue()) == true
-            Self.removeStaleWorkingFiles()
-            refreshChatGPTStatus()
-        }
+        Self.removeStaleWorkingFiles()
+        refreshAPIKeyStatus()
+        refreshChatGPTStatus()
     }
 
+    var hasAPIKey: Bool { apiKeyStatus.hasSavedKey }
+    var apiKeyStatusText: String {
+        isCheckingAPIKey ? APIKeyStatus.checking.statusText : apiKeyStatus.statusText
+    }
     var isRecording: Bool { phase == .recording }
     var isBusy: Bool { if case .processing = phase { true } else { false } }
     var audioStatus: RecordingAudioStatus {
@@ -186,7 +188,33 @@ final class AppState: ObservableObject {
 
     var authorizationRequiredMessage: String? {
         guard !canUseSelectedModel else { return nil }
-        return selectedModel.requiresAPIKey ? "Добавьте OpenAI API key" : chatGPTStatusText
+        return selectedModel.requiresAPIKey ? apiKeyStatus.authorizationRequiredMessage : chatGPTStatusText
+    }
+
+    func refreshAPIKeyStatus() {
+        guard apiKeyCheckTask == nil, !isRecording, !isBusy else { return }
+        isCheckingAPIKey = true
+        // Only query presence, never the password data. A synchronous Keychain
+        // lookup must not block rendering or activation of the menu.
+        let store = keychain
+        apiKeyCheckTask = Task { [weak self] in
+            let checkedStatus = await Task.detached(priority: .utility) {
+                APIKeyStatus.checkPresence { try store.containsValue() }
+            }.value
+            guard !Task.isCancelled, let self else { return }
+            self.apiKeyStatus = checkedStatus
+            self.isCheckingAPIKey = false
+            self.apiKeyCheckTask = nil
+        }
+    }
+
+    private func setAPIKeyStatus(_ status: APIKeyStatus) {
+        // A check started before a save/delete/read must not overwrite the
+        // newer result when its asynchronous lookup eventually returns.
+        apiKeyCheckTask?.cancel()
+        apiKeyCheckTask = nil
+        isCheckingAPIKey = false
+        apiKeyStatus = status
     }
 
     func refreshChatGPTStatus(manual: Bool = false) {
@@ -209,10 +237,17 @@ final class AppState: ObservableObject {
                 try await session.accessToken(refresh: refresh)
             }
         }
-        guard let key = try keychain.read(), !key.isEmpty else {
-            hasAPIKey = false
+        let key: String?
+        do { key = try keychain.read() }
+        catch {
+            setAPIKeyStatus(.unavailable)
+            throw error
+        }
+        guard let key, !key.isEmpty else {
+            setAPIKeyStatus(.missing)
             throw AppStateError.missingAPIKey
         }
+        setAPIKeyStatus(.available)
         return OpenAITranscriptionClient(apiKey: key)
     }
 
@@ -246,13 +281,13 @@ final class AppState: ObservableObject {
 
     func saveAPIKey(_ value: String) throws {
         try keychain.save(value)
-        hasAPIKey = !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        setAPIKeyStatus(value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? .missing : .available)
         if hasAPIKey, case .failed = phase { phase = .idle }
     }
 
     func deleteAPIKey() throws {
         try keychain.delete()
-        hasAPIKey = false
+        setAPIKeyStatus(.missing)
     }
 
     func chooseAudioDirectory() -> Bool {

@@ -12,6 +12,7 @@ mkdir -p "$preview_bundle/Contents/MacOS" "$preview_bundle/Contents/Resources"
 swiftc -swift-version 5 -parse-as-library \
     -emit-module -emit-library -module-name TranscribatorCore \
     "$package_dir/Sources/TranscribatorCore/AppStatus.swift" \
+    "$package_dir/Sources/TranscribatorCore/APIKeyStatus.swift" \
     "$package_dir/Sources/TranscribatorCore/TranscriptionModel.swift" \
     "$package_dir/Sources/TranscribatorCore/AudioQuality.swift" \
     -emit-module-path "$preview_dir/TranscribatorCore.swiftmodule" \

@@ -104,8 +104,12 @@ struct MenuBarContentView: View {
         }
         .padding(16)
         .frame(width: 390)
-        .onAppear { state.refreshChatGPTStatus() }
+        .onAppear {
+            state.refreshAPIKeyStatus()
+            state.refreshChatGPTStatus()
+        }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            state.refreshAPIKeyStatus()
             state.refreshChatGPTStatus()
         }
         .onChange(of: state.isRecording) { _, isRecording in

@@ -17,7 +17,8 @@ struct MediaFileInfo {
 final class AppState: ObservableObject {
     @Published var phase: TranscriptionPhase = .recording
     @Published var startedAt: Date? = Date().addingTimeInterval(-19)
-    @Published var hasAPIKey = true
+    @Published var apiKeyStatus: APIKeyStatus = .available
+    @Published var isCheckingAPIKey = false
     @Published var chatGPTStatus: ChatGPTAppStatus = .ready
     @Published var isCheckingChatGPT = false
     @Published var lastTranscriptURL: URL?
@@ -38,6 +39,10 @@ final class AppState: ObservableObject {
 
     var isRecording: Bool { phase == .recording }
     var isBusy: Bool { if case .processing = phase { true } else { false } }
+    var hasAPIKey: Bool { apiKeyStatus.hasSavedKey }
+    var apiKeyStatusText: String {
+        isCheckingAPIKey ? APIKeyStatus.checking.statusText : apiKeyStatus.statusText
+    }
     var audioStatus: RecordingAudioStatus {
         RecordingAudioStatus(includesMicrophone: includesMicrophone,
                              microphoneVolume: microphoneVolume,
@@ -49,11 +54,15 @@ final class AppState: ObservableObject {
     var canUseSelectedModel: Bool { selectedModel.requiresAPIKey ? hasAPIKey : canSelectGPTApp }
     var canSelectGPTApp: Bool { chatGPTStatus == .ready && !isCheckingChatGPT }
     var chatGPTStatusText: String { "Подключена текущая сессия ChatGPT" }
-    var authorizationRequiredMessage: String? { canUseSelectedModel ? nil : "Подключите выбранную модель" }
+    var authorizationRequiredMessage: String? {
+        guard !canUseSelectedModel else { return nil }
+        return selectedModel.requiresAPIKey ? apiKeyStatus.authorizationRequiredMessage : "Подключите выбранную модель"
+    }
 
     func setMicrophoneEnabled(_ enabled: Bool) { includesMicrophone = enabled }
     func setSystemAudioEnabled(_ enabled: Bool) { systemAudioVolume = enabled ? 0.65 : 0 }
     func refreshChatGPTStatus(manual _: Bool = false) {}
+    func refreshAPIKeyStatus() {}
     func toggleRecording() {}
     func cancelRecording() {}
     func chooseMediaFile() {}

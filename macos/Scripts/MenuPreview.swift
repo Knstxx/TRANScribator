@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import TranscribatorCore
 
 // Renders the real menu/settings views against MenuPreviewState.swift only.
 // No production AppState, app delegate, shown window, or live app is involved.
@@ -60,6 +61,26 @@ private enum MenuPreview {
                     try render(settingsHosting, to: output.appendingPathComponent("settings-content-\(suffix).png"), scenario: scenario)
                     print("PASS: settings-content-\(suffix), NSScrollView=0, all settings rendered without a fixed viewport.")
                 }
+            }
+            for (name, keyStatus) in [("checking", APIKeyStatus.checking), ("missing", .missing), ("unavailable", .unavailable)] {
+                let scenario = "api-key-\(name)-\(suffix)"
+                let state = AppState()
+                state.phase = .idle
+                state.startedAt = nil
+                state.selectedModel = .transcribe
+                state.apiKeyStatus = keyStatus
+                state.isCheckingAPIKey = keyStatus == .checking
+                let content = MenuBarContentView(settingsExpanded: true)
+                    .environmentObject(state)
+                    .environment(\.colorScheme, scheme)
+                let hosting = prepare(content)
+                let scrolls = descendants(of: hosting).compactMap { $0 as? NSScrollView }
+                guard scrolls.count == 1 else { throw Failure.invalidScrollCount(scenario, scrolls.count) }
+                guard hosting.frame.width == 390, hosting.frame.height > 250, hosting.frame.height <= 760 else {
+                    throw Failure.invalidHeight(scenario, hosting.frame.height)
+                }
+                try render(hosting, to: output.appendingPathComponent("\(scenario).png"), scenario: scenario)
+                print("PASS: \(scenario), size=\(hosting.frame.size), separate API key status, NSScrollView=1.")
             }
         }
         print("Rendered real recording menus with collapsed/expanded settings in both themes into \(output.path).")

@@ -43,7 +43,15 @@ enum ExistingFileTranscriptionRunner {
         guard let model = TranscriptionModel(rawValue: modelName) else {
             throw RecoveryError.unknownModel(modelName)
         }
-        return Request(inputURL: inputURL, outputURL: outputURL, model: model)
+        let diagnosticsURL = value(after: "--diagnostics", in: arguments)
+            .map { URL(fileURLWithPath: $0).standardizedFileURL }
+        if arguments.contains("--diagnostics") {
+            guard let diagnosticsURL, model == .gptApp,
+                  diagnosticsURL != outputURL, diagnosticsURL != inputURL else {
+                throw RecoveryError.usage
+            }
+        }
+        return Request(inputURL: inputURL, outputURL: outputURL, model: model, diagnosticsURL: diagnosticsURL)
     }
 
     private static func value(after flag: String, in arguments: [String]) -> String? {
@@ -63,13 +71,26 @@ enum ExistingFileTranscriptionRunner {
         guard !FileManager.default.fileExists(atPath: request.outputURL.path) else {
             throw RecoveryError.outputExists(request.outputURL.path)
         }
+        if let url = request.diagnosticsURL,
+           FileManager.default.fileExists(atPath: url.path) {
+            throw RecoveryError.outputExists(url.path)
+        }
 
+        let diagnostics = DictationDiagnosticsRecorder()
+        defer { writeDiagnostics(diagnostics, to: request.diagnosticsURL) }
         let client: AudioTranscriptionRequesting
         if request.model == .gptApp {
             let session = ChatGPTAppSession()
-            client = ChatGPTTranscriptionClient { refresh in
-                try await session.accessToken(refresh: refresh)
+            let handler: ChatGPTTranscriptionClient.DiagnosticsHandler?
+            if request.diagnosticsURL != nil {
+                handler = { event in diagnostics.append(event) }
+            } else {
+                handler = nil
             }
+            client = ChatGPTTranscriptionClient(
+                tokenProvider: { refresh in try await session.accessToken(refresh: refresh) },
+                diagnostics: handler
+            )
         } else {
             guard let apiKey = try KeychainStore().read(), !apiKey.isEmpty else {
                 throw RecoveryError.missingAPIKey
@@ -126,10 +147,43 @@ enum ExistingFileTranscriptionRunner {
         try FileManager.default.moveItem(at: temporaryURL, to: outputURL)
     }
 
+    private static func writeDiagnostics(_ recorder: DictationDiagnosticsRecorder, to url: URL?) {
+        guard let url else { return }
+        do {
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            let text = String(decoding: try encoder.encode(recorder.snapshot()), as: UTF8.self)
+            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try writeTranscriptAtomicallyWithoutOverwriting(text, to: url)
+        } catch {
+            // Optional diagnostics must never discard a successful transcript or mask its error.
+            FileHandle.standardError.write(Data("Не удалось сохранить диагностические метрики GPT App\n".utf8))
+        }
+    }
+
     private struct Request {
         let inputURL: URL
         let outputURL: URL
         let model: TranscriptionModel
+        let diagnosticsURL: URL?
+    }
+}
+
+/// Only sanitized response metrics enter this recorder, never session or response body data.
+private final class DictationDiagnosticsRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var events: [ChatGPTTranscriptionDiagnostics] = []
+
+    func append(_ event: ChatGPTTranscriptionDiagnostics) {
+        lock.lock()
+        defer { lock.unlock() }
+        events.append(event)
+    }
+
+    func snapshot() -> [ChatGPTTranscriptionDiagnostics] {
+        lock.lock()
+        defer { lock.unlock() }
+        return events
     }
 }
 
@@ -143,7 +197,7 @@ private enum RecoveryError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .usage:
-            "Использование: --transcribe-existing <audio-or-video> --output <output.txt> [--model <id>]"
+            "Использование: --transcribe-existing <audio-or-video> --output <output.txt> [--model <id>] [--diagnostics <metrics.json> (только GPT App)]"
         case .inputMissing(let path):
             "Аудиофайл не найден: \(path)"
         case .outputExists(let path):

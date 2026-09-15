@@ -2,12 +2,12 @@ import AVFoundation
 import Foundation
 
 public struct AudioChunkingPolicy: Sendable {
-    // User-selected upload duration: ten seconds below the ten-minute dictation limit.
-    // Keep enough byte headroom for 590 seconds at every supported AAC quality.
+    // User-selected upload duration; acceptance by dictation does not prove output completeness.
+    // Keep enough byte headroom for five minutes at every supported AAC quality.
     public static let gptApp = AudioChunkingPolicy(
         maxUploadBytes: 24_000_000,
         targetChunkBytes: 20 * 1024 * 1024,
-        maxChunkDurationSeconds: 9 * 60 + 50
+        maxChunkDurationSeconds: 5 * 60
     )
 
     public let maxUploadBytes: Int64

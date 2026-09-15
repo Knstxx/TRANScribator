@@ -6,14 +6,22 @@ package_dir=${script_dir:h}
 configuration=${1:-release}
 arm64_scratch="$package_dir/.build/universal-arm64"
 x86_64_scratch="$package_dir/.build/universal-x86_64"
+swift_build=(swift build)
+# Optional per-invocation toolchain selection; never changes xcode-select globally.
+if [[ -n ${TRANSCRIBATOR_SWIFT_BUILD_SYSTEM:-} ]]; then
+    swift_build+=(--build-system "$TRANSCRIBATOR_SWIFT_BUILD_SYSTEM")
+fi
+if [[ -n ${SDKROOT:-} ]]; then
+    swift_build+=(--sdk "$SDKROOT")
+fi
 
-swift build \
+"${swift_build[@]}" \
     --package-path "$package_dir" \
     --scratch-path "$arm64_scratch" \
     -c "$configuration" \
     --arch arm64
 arm64_bin_dir=$(
-    swift build \
+    "${swift_build[@]}" \
         --package-path "$package_dir" \
         --scratch-path "$arm64_scratch" \
         -c "$configuration" \
@@ -21,13 +29,13 @@ arm64_bin_dir=$(
         --show-bin-path
 )
 
-swift build \
+"${swift_build[@]}" \
     --package-path "$package_dir" \
     --scratch-path "$x86_64_scratch" \
     -c "$configuration" \
     --arch x86_64
 x86_64_bin_dir=$(
-    swift build \
+    "${swift_build[@]}" \
         --package-path "$package_dir" \
         --scratch-path "$x86_64_scratch" \
         -c "$configuration" \

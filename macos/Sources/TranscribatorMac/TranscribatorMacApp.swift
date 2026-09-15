@@ -2,16 +2,22 @@ import SwiftUI
 import TranscribatorCore
 
 @main
-struct TranscribatorMacApp: App {
-    @StateObject private var state = AppState()
-
-    init() {
+enum TranscribatorEntryPoint {
+    @MainActor
+    static func main() async {
+        // Command-line work must not construct AppState or a second menu bar app.
         if ExistingFileTranscriptionRunner.isRequested {
-            Task { await ExistingFileTranscriptionRunner.runAndExit() }
+            await ExistingFileTranscriptionRunner.runAndExit()
         } else if CaptureSmokeRunner.isRequested {
-            Task { await CaptureSmokeRunner.runAndExit() }
+            await CaptureSmokeRunner.runAndExit()
+        } else {
+            TranscribatorMacApp.main()
         }
     }
+}
+
+struct TranscribatorMacApp: App {
+    @StateObject private var state = AppState()
 
     var body: some Scene {
         MenuBarExtra {

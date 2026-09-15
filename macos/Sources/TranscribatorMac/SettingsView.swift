@@ -19,15 +19,23 @@ struct SettingsView: View {
 
             HStack {
                 Label(
-                    state.hasAPIKey ? "API key сохранён в Keychain" : "API key не добавлен",
+                    state.apiKeyStatusText,
                     systemImage: state.hasAPIKey ? "checkmark.circle.fill" : "key"
                 )
-                .foregroundStyle(state.hasAPIKey ? .green : .secondary)
+                .foregroundStyle(state.hasAPIKey ? .green : state.apiKeyStatus == .unavailable ? .orange : .secondary)
+                .fixedSize(horizontal: false, vertical: true)
                 Spacer()
                 if state.hasAPIKey {
                     Button("Удалить", role: .destructive) { deleteAPIKey() }
                         .disabled(state.isRecording || state.isBusy)
                 }
+            }
+
+            if state.apiKeyStatus == .unavailable {
+                Button(state.isCheckingAPIKey ? "Проверка…" : "Повторить проверку ключа") {
+                    state.refreshAPIKeyStatus()
+                }
+                .disabled(state.isRecording || state.isBusy || state.isCheckingAPIKey)
             }
 
             SecureField(state.hasAPIKey ? "Новый ключ для замены" : "sk-…", text: $apiKeyDraft)
