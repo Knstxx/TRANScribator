@@ -14,6 +14,7 @@ struct MenuBarContentView: View {
 
     var body: some View {
         FittingMenuScrollView { panel }
+            .onDisappear { settingsExpanded = false }
     }
 
     private var panel: some View {
