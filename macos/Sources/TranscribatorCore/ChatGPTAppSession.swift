@@ -114,7 +114,7 @@ public actor ChatGPTAppSession {
     }
 }
 
-private enum ChatGPTAppInstallation {
+enum ChatGPTAppInstallation {
     static func executable() async throws -> URL {
         let registered = await MainActor.run {
             ["com.openai.codex", "com.openai.chat"].compactMap {
@@ -133,13 +133,29 @@ private enum ChatGPTAppInstallation {
             sawApplication = true
             guard let identifier = Bundle(url: app)?.bundleIdentifier,
                   ["com.openai.codex", "com.openai.chat"].contains(identifier) else { continue }
-            let helper = app.appendingPathComponent("Contents/Resources/codex").resolvingSymlinksInPath()
-            guard helper.path.hasPrefix(app.path + "/"),
-                  FileManager.default.isExecutableFile(atPath: helper.path),
-                  isOfficialCode(app, identifier: identifier), isOfficialCode(helper, identifier: "codex") else { continue }
-            return helper
+            if let helper = verifiedHelper(in: app, identifier: identifier) { return helper }
         }
         throw sawApplication ? ChatGPTAppSessionError.unavailable : ChatGPTAppSessionError.notInstalled
+    }
+
+    /// An internal verifier seam keeps layout and containment checks testable
+    /// without launching an installed helper or using a real desktop session.
+    static func verifiedHelper(in application: URL, identifier: String,
+                               verifyCode: (URL, String) -> Bool = isOfficialCode) -> URL? {
+        let app = application.resolvingSymlinksInPath()
+        guard ["com.openai.codex", "com.openai.chat"].contains(identifier),
+              verifyCode(app, identifier) else { return nil }
+        // Newer desktop releases package the signed executable in CodexCLI.app.
+        // Invoke that Mach-O directly; codex-cli/bin/codex is a shell wrapper.
+        for relativePath in ["Contents/Resources/codex",
+                             "Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex"] {
+            let helper = app.appendingPathComponent(relativePath).resolvingSymlinksInPath()
+            guard helper.path.hasPrefix(app.path + "/"),
+                  FileManager.default.isExecutableFile(atPath: helper.path),
+                  verifyCode(helper, "codex") else { continue }
+            return helper
+        }
+        return nil
     }
 
     private static func isOfficialCode(_ url: URL, identifier: String) -> Bool {

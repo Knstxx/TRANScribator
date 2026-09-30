@@ -15,6 +15,7 @@ struct ChatGPTAppSessionChecks {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("gpt-session-checks-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
         defer { try? FileManager.default.removeItem(at: directory) }
+        try checkHelperDiscovery(in: directory)
         let server = directory.appendingPathComponent("mock-helper")
         let script = #"""
         #!/bin/sh
@@ -150,7 +151,57 @@ struct ChatGPTAppSessionChecks {
             try await early.value
             throw CheckError.failed("Cancellation before initialization was ignored")
         } catch is CancellationError { }
-        print("GPT App auth checks passed: private protocol, session reuse, environment, expiry, redaction, bounds, timeout, cancellation, early cancellation, immediate exit, forced child termination.")
+        print("GPT App auth checks passed: signed helper layouts, containment, private protocol, session reuse, environment, expiry, redaction, bounds, timeout, cancellation, early cancellation, immediate exit, forced child termination.")
+    }
+
+    static func checkHelperDiscovery(in directory: URL) throws {
+        let manager = FileManager.default
+        let app = directory.appendingPathComponent("Fixture.app").resolvingSymlinksInPath()
+        let legacy = app.appendingPathComponent("Contents/Resources/codex")
+        let packaged = app.appendingPathComponent("Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex")
+        let wrapper = app.appendingPathComponent("Contents/Resources/codex-cli/bin/codex")
+        let identifier = "com.openai.codex"
+        // These files are never executed. The fake verifier approves only the
+        // expected app and helper identities, while real signature validation
+        // must reject this unsigned fixture.
+        func createExecutable(_ url: URL) throws {
+            try manager.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try Data("offline fixture".utf8).write(to: url)
+            try manager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: url.path)
+        }
+        let approved: (URL, String) -> Bool = { url, expectedIdentifier in
+            (url.path == app.path && expectedIdentifier == identifier)
+                || ([legacy.path, packaged.path].contains(url.path) && expectedIdentifier == "codex")
+        }
+        try createExecutable(legacy)
+        try require(ChatGPTAppInstallation.verifiedHelper(in: app, identifier: identifier, verifyCode: approved)?.path == legacy.path,
+                    "Legacy desktop helper layout was lost")
+        try require(ChatGPTAppInstallation.verifiedHelper(in: app, identifier: identifier) == nil,
+                    "Unsigned fixture app passed real signature validation")
+        try manager.removeItem(at: legacy)
+        try createExecutable(packaged)
+        try require(ChatGPTAppInstallation.verifiedHelper(in: app, identifier: identifier, verifyCode: approved)?.path == packaged.path,
+                    "Packaged desktop helper layout was not discovered")
+        try require(ChatGPTAppInstallation.verifiedHelper(in: app, identifier: identifier, verifyCode: { _, _ in false }) == nil,
+                    "Untrusted application was accepted")
+        try require(ChatGPTAppInstallation.verifiedHelper(in: app, identifier: identifier, verifyCode: { url, _ in url.path == app.path }) == nil,
+                    "Untrusted helper was accepted")
+        try createExecutable(legacy)
+        try require(ChatGPTAppInstallation.verifiedHelper(in: app, identifier: identifier, verifyCode: approved)?.path == legacy.path,
+                    "Legacy layout precedence changed")
+        try manager.removeItem(at: legacy)
+        try manager.removeItem(at: packaged)
+        try createExecutable(wrapper)
+        try require(ChatGPTAppInstallation.verifiedHelper(in: app, identifier: identifier, verifyCode: { _, _ in true }) == nil,
+                    "Shell wrapper was accepted as a helper")
+        let outside = directory.appendingPathComponent("outside-helper")
+        try createExecutable(outside)
+        for path in [legacy, packaged] {
+            try manager.createSymbolicLink(at: path, withDestinationURL: outside)
+            try require(ChatGPTAppInstallation.verifiedHelper(in: app, identifier: identifier, verifyCode: { _, _ in true }) == nil,
+                        "Helper symlink escaped the application bundle")
+            try manager.removeItem(at: path)
+        }
     }
 
     actor Gate {
