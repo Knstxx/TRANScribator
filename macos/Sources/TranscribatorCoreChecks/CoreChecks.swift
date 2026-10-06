@@ -28,6 +28,7 @@ struct TranscribatorCoreChecks {
         try checkGPTAppPolicy()
         try await checkChatGPTClient()
         try await GPTAppPipelineChecks.run()
+        try await TranscriptRecoveryStoreChecks.run()
         try APIKeyStatusChecks.run()
         try checkAppStatusPolicy()
         try checkMultipartAndResponseParsing()

@@ -17,6 +17,7 @@ final class AppState: ObservableObject {
     @Published private(set) var isCheckingChatGPT = true
     @Published private(set) var lastTranscriptURL: URL?
     @Published private(set) var lastRecordingURL: URL?
+    @Published private(set) var lastResultNotice: String?
     @Published private(set) var selectedMediaFile: MediaFileInfo?
     @Published private(set) var isFileTranscribing = false
     @Published private(set) var isInspectingMediaFile = false
@@ -145,7 +146,10 @@ final class AppState: ObservableObject {
             forKey: Self.lastSystemAudioVolumeKey,
             defaultValue: 0.65
         ))
-        Self.removeStaleWorkingFiles()
+        if let recovered = Self.removeStaleWorkingFiles() {
+            lastRecordingURL = recovered
+            lastResultNotice = "Найдена запись после прерванной обработки. Она сохранена для восстановления."
+        }
         refreshAPIKeyStatus()
         refreshChatGPTStatus()
     }
@@ -425,6 +429,9 @@ final class AppState: ObservableObject {
         let shouldCopyTranscript = copiesTranscriptToClipboard
 
         isFileTranscribing = true
+        lastTranscriptURL = nil
+        lastRecordingURL = media.sourceURL
+        lastResultNotice = nil
         phase = .processing(
             media.kind == .video ? "Извлечение аудиодорожки…" : "Подготовка аудио…"
         )
@@ -462,7 +469,6 @@ final class AppState: ObservableObject {
         transcriptOutputDirectory: URL,
         shouldCopyTranscript: Bool
     ) async {
-        var createdTranscriptURL: URL?
         defer {
             fileTranscriptionTask = nil
             isFileTranscribing = false
@@ -477,12 +483,23 @@ final class AppState: ObservableObject {
             )
             try Task.checkCancellation()
 
+            let recovery = try TranscriptRecoveryStore(
+                outputURL: uniqueOutputURL(directory: transcriptOutputDirectory, fileStem: fileStem, fileExtension: "txt"),
+                sourceAudioURL: media.sourceURL
+            )
+
             let transcript = try await transcriptionPipeline.transcribe(
                 audioURL: preparedAudioURL,
                 quality: quality,
                 model: model,
                 initialPrompt: initialPrompt,
-                client: client
+                client: client,
+                checkpoint: { [weak self] checkpoint in
+                    try recovery.save(checkpoint)
+                    if recovery.hasPartialTranscript {
+                        self?.lastTranscriptURL = recovery.partialTranscriptURL
+                    }
+                }
             ) { [weak self] progress in
                 guard let self else { return }
                 switch progress {
@@ -498,29 +515,15 @@ final class AppState: ObservableObject {
             }
             try Task.checkCancellation()
 
-            try FileManager.default.createDirectory(
-                at: transcriptOutputDirectory,
-                withIntermediateDirectories: true
-            )
-            let transcriptURL = uniqueOutputURL(
-                directory: transcriptOutputDirectory,
-                fileStem: fileStem,
-                fileExtension: "txt"
-            )
-            try transcript.write(to: transcriptURL, atomically: true, encoding: .utf8)
-            createdTranscriptURL = transcriptURL
-            try Task.checkCancellation()
-            try Self.removeWorkingSession(at: directory)
-            try Task.checkCancellation()
-            lastTranscriptURL = transcriptURL
+            try recovery.finish(transcript)
+            lastTranscriptURL = recovery.outputURL
+            lastResultNotice = Self.resultNotice(for: recovery.lastCheckpoint)
+            try? Self.removeWorkingSession(at: directory)
             if shouldCopyTranscript { copyToPasteboard(transcript) }
             phase = .done(copied: shouldCopyTranscript)
             notifyFinished(copied: shouldCopyTranscript)
         } catch is CancellationError {
-            if let createdTranscriptURL {
-                try? FileManager.default.removeItem(at: createdTranscriptURL)
-                if lastTranscriptURL == createdTranscriptURL { lastTranscriptURL = nil }
-            }
+            lastResultNotice = lastTranscriptURL == nil ? nil : "Частичный текст сохранён. Исходный файл доступен для повторной обработки."
             do {
                 try Self.removeWorkingSession(at: directory)
                 phase = .cancelled("Транскрибация файла отменена")
@@ -531,6 +534,7 @@ final class AppState: ObservableObject {
             }
         } catch {
             let operationError = error
+            lastResultNotice = lastTranscriptURL == nil ? nil : "Частичный текст сохранён. Исходный файл доступен для повторной обработки."
             updateChatGPTAfterFailure(operationError, model: model)
             do {
                 try Self.removeWorkingSession(at: directory)
@@ -598,6 +602,7 @@ final class AppState: ObservableObject {
             ]
             lastRecordingURL = nil
             lastTranscriptURL = nil
+            lastResultNotice = nil
             startedAt = Date()
             phase = .recording
         } catch {
@@ -619,7 +624,10 @@ final class AppState: ObservableObject {
         guard let directory = sessionDirectory,
               let fileStem = sessionFileStem,
               let audioQuality = sessionAudioQuality else {
-            if let sessionDirectory { try? Self.removeWorkingSession(at: sessionDirectory) }
+            if let sessionDirectory {
+                lastRecordingURL = (try? Self.preserveWorkingSession(at: sessionDirectory)) ?? sessionDirectory
+                lastResultNotice = "Исходная запись сохранена для восстановления."
+            }
             sessionDirectory = nil
             sessionFileStem = nil
             sessionAudioQuality = nil
@@ -639,13 +647,15 @@ final class AppState: ObservableObject {
         let transcriptOutputDirectory = transcriptsDirectoryURL
         let model = selectedModel
 
-        Task {
+        Task { [self] in
+            var canRemoveWorkingSession = false
+            var recoveryStore: TranscriptRecoveryStore?
+            var disposableBackupURL: URL?
+            let workingRecordingURL = directory.appendingPathComponent("recording.m4a")
+            defer {
+                if canRemoveWorkingSession { try? Self.removeWorkingSession(at: directory) }
+            }
             do {
-                defer {
-                    try? Self.removeWorkingSession(at: directory)
-                }
-
-                let workingRecordingURL = directory.appendingPathComponent("recording.m4a")
                 let volumeAutomation = Dictionary(uniqueKeysWithValues: sources.map { source in
                     let points = source.lastPathComponent == AudioCaptureSession.microphoneSourceFilename
                         ? microphoneAutomation
@@ -671,16 +681,37 @@ final class AppState: ObservableObject {
                     )
                     try FileManager.default.copyItem(at: workingRecordingURL, to: recordingURL)
                     lastRecordingURL = recordingURL
+                    canRemoveWorkingSession = true
                 } else {
                     lastRecordingURL = nil
                 }
 
+                let recovery = try TranscriptRecoveryStore(
+                    outputURL: uniqueOutputURL(directory: transcriptOutputDirectory, fileStem: fileStem, fileExtension: "txt"),
+                    sourceAudioURL: lastRecordingURL ?? workingRecordingURL
+                )
+                recoveryStore = recovery
+                if !shouldSaveAudio {
+                    let backupURL = recovery.recoveryDirectoryURL.appendingPathComponent("recording.m4a")
+                    try FileManager.default.copyItem(at: workingRecordingURL, to: backupURL)
+                    try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: backupURL.path)
+                    lastRecordingURL = backupURL
+                    disposableBackupURL = backupURL
+                    canRemoveWorkingSession = true
+                    try recovery.relocateSourceAudio(to: backupURL)
+                }
                 let client = try makeTranscriptionClient(for: model)
                 let transcript = try await transcriptionPipeline.transcribe(
                     audioURL: workingRecordingURL,
                     quality: audioQuality,
                     model: model,
-                    client: client
+                    client: client,
+                    checkpoint: { [weak self] checkpoint in
+                        try recovery.save(checkpoint)
+                        if recovery.hasPartialTranscript {
+                            self?.lastTranscriptURL = recovery.partialTranscriptURL
+                        }
+                    }
                 ) { [weak self] progress in
                     guard let self else { return }
                     switch progress {
@@ -694,21 +725,34 @@ final class AppState: ObservableObject {
                         )
                     }
                 }
-                try FileManager.default.createDirectory(
-                    at: transcriptOutputDirectory,
-                    withIntermediateDirectories: true
-                )
-                let transcriptURL = uniqueOutputURL(
-                    directory: transcriptOutputDirectory,
-                    fileStem: fileStem,
-                    fileExtension: "txt"
-                )
-                try transcript.write(to: transcriptURL, atomically: true, encoding: .utf8)
-                lastTranscriptURL = transcriptURL
+                try recovery.finish(transcript)
+                canRemoveWorkingSession = true
+                lastTranscriptURL = recovery.outputURL
+                lastResultNotice = Self.resultNotice(for: recovery.lastCheckpoint)
+                // Honor the setting only after the final text is safely published.
+                // No-text intervals keep their audio available for inspection.
+                if let disposableBackupURL, recovery.lastCheckpoint?.noSpeechRanges.isEmpty == true {
+                    try? FileManager.default.removeItem(at: disposableBackupURL)
+                    if !FileManager.default.fileExists(atPath: disposableBackupURL.path) { lastRecordingURL = nil }
+                }
                 if shouldCopyTranscript { copyToPasteboard(transcript) }
                 phase = .done(copied: shouldCopyTranscript)
                 notifyFinished(copied: shouldCopyTranscript)
             } catch {
+                if !canRemoveWorkingSession {
+                    // A failed export/request must never delete the only recording.
+                    // If moving it fails, leave Work in place for recovery at startup.
+                    let preserved = (try? Self.preserveWorkingSession(at: directory)) ?? directory
+                    let mixed = preserved.appendingPathComponent("recording.m4a")
+                    lastRecordingURL = FileManager.default.fileExists(atPath: mixed.path)
+                        ? mixed : preserved
+                    if FileManager.default.fileExists(atPath: mixed.path) {
+                        try? recoveryStore?.relocateSourceAudio(to: mixed)
+                    }
+                }
+                lastResultNotice = lastTranscriptURL == nil
+                    ? "Аудиозапись сохранена для повторной обработки."
+                    : "Частичный текст и аудиозапись сохранены для повторной обработки."
                 updateChatGPTAfterFailure(error, model: model)
                 phase = .failed(error.localizedDescription)
             }
@@ -747,6 +791,11 @@ final class AppState: ObservableObject {
 
     func resetStatus() {
         if !isRecording && !isBusy { phase = .idle }
+    }
+
+    private static func resultNotice(for checkpoint: AudioTranscriptionCheckpoint?) -> String? {
+        guard let checkpoint, !checkpoint.noSpeechRanges.isEmpty else { return nil }
+        return "В отдельных фрагментах речь не распознана после повторной проверки. Аудио сохранено."
     }
 
     private func makeWorkingSession(
@@ -894,10 +943,29 @@ final class AppState: ObservableObject {
             .standardizedFileURL
     }
 
-    private static func removeStaleWorkingFiles() {
-        try? FileManager.default.removeItem(at: workingRootDirectory())
+    private static func removeStaleWorkingFiles() -> URL? {
+        // After a crash these files may be the only copy of a meeting.
+        var recovered: URL?
+        if FileManager.default.fileExists(atPath: workingRootDirectory().path) {
+            let items = (try? FileManager.default.contentsOfDirectory(atPath: workingRootDirectory().path)) ?? []
+            if !items.isEmpty {
+                recovered = (try? preserveWorkingSession(at: workingRootDirectory())) ?? workingRootDirectory()
+            } else {
+                try? removeDirectoryIfEmpty(at: workingRootDirectory())
+            }
+        }
         try? removeDirectoryIfEmpty(at: workingContainerDirectory())
         removeStaleTemporaryDirectories()
+        return recovered
+    }
+
+    private static func preserveWorkingSession(at directory: URL) throws -> URL {
+        let recovery = workingContainerDirectory().appendingPathComponent("Recovery", isDirectory: true)
+        try FileManager.default.createDirectory(at: recovery, withIntermediateDirectories: true,
+                                                attributes: [.posixPermissions: 0o700])
+        let destination = recovery.appendingPathComponent("Recording-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.moveItem(at: directory, to: destination)
+        return destination
     }
 
     private static func removeStaleTemporaryDirectories() {

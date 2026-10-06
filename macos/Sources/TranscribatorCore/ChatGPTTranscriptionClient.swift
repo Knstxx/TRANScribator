@@ -169,9 +169,10 @@ public final class ChatGPTTranscriptionClient: AudioTranscriptionRequesting, @un
               let response = try? JSONDecoder().decode(Response.self, from: data) else {
             throw ChatGPTTranscriptionError.invalidResponse
         }
-        let text = response.text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else { throw ChatGPTTranscriptionError.emptyTranscript }
-        return text
+        // An explicit empty string is a valid ASR result (for example, on silence).
+        // The pipeline retries this audio in bounded shorter parts and retains no-text ranges.
+        // Missing, null, or non-string text remains a malformed response above.
+        return response.text.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private static func isCancellation(_ error: Error) -> Bool {

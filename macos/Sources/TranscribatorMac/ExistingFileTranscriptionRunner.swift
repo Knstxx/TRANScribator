@@ -60,6 +60,7 @@ enum ExistingFileTranscriptionRunner {
         return arguments[index + 1]
     }
 
+    @MainActor
     private static func transcribe(_ request: Request) async throws {
         var isDirectory: ObjCBool = false
         guard FileManager.default.fileExists(
@@ -75,6 +76,18 @@ enum ExistingFileTranscriptionRunner {
            FileManager.default.fileExists(atPath: url.path) {
             throw RecoveryError.outputExists(url.path)
         }
+
+        let recovery = try TranscriptRecoveryStore(
+            outputURL: request.outputURL,
+            sourceAudioURL: request.inputURL
+        )
+        var completed = false
+        defer {
+            if !completed, recovery.hasPartialTranscript {
+                FileHandle.standardError.write(Data("Частичный текст сохранён: \(recovery.partialTranscriptURL.path)\n".utf8))
+            }
+        }
+        FileHandle.standardError.write(Data("Данные восстановления: \(recovery.checkpointURL.path)\n".utf8))
 
         let diagnostics = DictationDiagnosticsRecorder()
         defer { writeDiagnostics(diagnostics, to: request.diagnosticsURL) }
@@ -115,21 +128,20 @@ enum ExistingFileTranscriptionRunner {
         let transcript = try await AudioTranscriptionPipeline().transcribe(
             audioURL: workingRecordingURL,
             model: request.model,
-            client: client
+            client: client,
+            checkpoint: { try recovery.save($0) }
         ) { progress in
             guard case .transcribing(let index, let count) = progress else { return }
             FileHandle.standardError.write(
                 Data("Транскрибирование \(index) из \(count)…\n".utf8)
             )
         }
-        try FileManager.default.createDirectory(
-            at: request.outputURL.deletingLastPathComponent(),
-            withIntermediateDirectories: true
-        )
-        try writeTranscriptAtomicallyWithoutOverwriting(
-            transcript,
-            to: request.outputURL
-        )
+        try Task.checkCancellation()
+        try recovery.finish(transcript)
+        completed = true
+        if let checkpoint = recovery.lastCheckpoint, !checkpoint.noSpeechRanges.isEmpty {
+            FileHandle.standardError.write(Data("Есть фрагменты без распознанной речи после повторной проверки; интервалы сохранены в данных восстановления.\n".utf8))
+        }
     }
 
     private static func writeTranscriptAtomicallyWithoutOverwriting(

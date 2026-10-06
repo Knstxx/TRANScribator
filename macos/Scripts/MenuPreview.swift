@@ -82,6 +82,27 @@ private enum MenuPreview {
                 try render(hosting, to: output.appendingPathComponent("\(scenario).png"), scenario: scenario)
                 print("PASS: \(scenario), size=\(hosting.frame.size), separate API key status, NSScrollView=1.")
             }
+            for failed in [false, true] {
+                let scenario = "recovery-\(failed ? "partial" : "completed")-\(suffix)"
+                let state = AppState()
+                state.phase = failed ? .failed("Не удалось подключиться к ChatGPT") : .done(copied: false)
+                state.startedAt = nil
+                state.lastTranscriptURL = URL(fileURLWithPath: "/Preview/\(failed ? "partial" : "transcript").txt")
+                state.lastResultNotice = failed
+                    ? "Частичный текст и аудиозапись сохранены для повторной обработки."
+                    : "В отдельных фрагментах речь не распознана после повторной проверки. Аудио сохранено."
+                let content = MenuBarContentView()
+                    .environmentObject(state)
+                    .environment(\.colorScheme, scheme)
+                let hosting = prepare(content)
+                let scrolls = descendants(of: hosting).compactMap { $0 as? NSScrollView }
+                guard scrolls.count == 1 else { throw Failure.invalidScrollCount(scenario, scrolls.count) }
+                guard hosting.frame.width == 390, hosting.frame.height <= 760 else {
+                    throw Failure.invalidHeight(scenario, hosting.frame.height)
+                }
+                try render(hosting, to: output.appendingPathComponent("\(scenario).png"), scenario: scenario)
+                print("PASS: \(scenario), result notice rendered, NSScrollView=1.")
+            }
         }
         print("Rendered real recording menus with collapsed/expanded settings in both themes into \(output.path).")
     }

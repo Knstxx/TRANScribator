@@ -58,6 +58,12 @@ struct MenuBarContentView: View {
                     state.revealLastResult()
                 }
             }
+            if let notice = state.lastResultNotice {
+                Text(notice)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
 
             if settingsExpanded {
                 Divider()

@@ -23,6 +23,7 @@ final class AppState: ObservableObject {
     @Published var isCheckingChatGPT = false
     @Published var lastTranscriptURL: URL?
     @Published var lastRecordingURL: URL?
+    @Published var lastResultNotice: String?
     @Published var selectedMediaFile: MediaFileInfo?
     @Published var isFileTranscribing = false
     @Published var isInspectingMediaFile = false

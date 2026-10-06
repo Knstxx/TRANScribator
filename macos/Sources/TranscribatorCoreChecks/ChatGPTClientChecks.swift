@@ -56,6 +56,14 @@ extension TranscribatorCoreChecks {
         let refreshFlags = await rejectedTokens.refreshFlags
         try require(refreshFlags == [false], "GPT App must never initiate a login or refresh the app session")
 
+        for emptyText in ["", "  \n \t"] {
+            ChatGPTFixtureURLProtocol.fixture.reset([.response(200, try JSONEncoder().encode(["text": emptyText]))])
+            let noText = try await client.transcribe(fileURL: audioURL, model: .gptApp)
+            try require(noText.isEmpty, "An explicit empty ASR string must be available to pipeline recovery")
+            try require(ChatGPTFixtureURLProtocol.fixture.requests.count == 1,
+                        "The transport must not retry empty text or change authentication")
+        }
+
         for target in ["https://attacker.invalid/collect", "https://chatgpt.com/other-path"] {
             ChatGPTFixtureURLProtocol.fixture.reset([.redirect(URL(string: target)!)])
             try await expectChatGPTFailure(.redirectBlocked) {
@@ -75,7 +83,6 @@ extension TranscribatorCoreChecks {
             (.response(200, Data("{}".utf8)), .invalidResponse),
             (.response(200, Data("{\"text\":null}".utf8)), .invalidResponse),
             (.response(200, try JSONEncoder().encode(["text": String(repeating: "x", count: 256 * 1_024)])), .invalidResponse),
-            (.response(200, try JSONEncoder().encode(["text": "  \n "])), .emptyTranscript),
             (.failure(NSError(domain: "fixture-network", code: 1, userInfo: [NSLocalizedDescriptionKey: untrustedSecret])), .network)
         ]
         for (action, expected) in failureFixtures {

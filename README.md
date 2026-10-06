@@ -18,7 +18,7 @@ Transcribator is a native macOS menu-bar app that records system audio and micro
 
 Requirements: macOS 15 or later, plus an OpenAI API key for the first three models or a compatible installed ChatGPT app with an active session for GPT App.
 
-1. Download the current **0.2.4** Universal DMG or ZIP from [Releases](https://github.com/Knstxx/TRANScribator/releases/tag/v0.2.4).
+1. Download the current **0.2.5** Universal DMG or ZIP from [Releases](https://github.com/Knstxx/TRANScribator/releases/tag/v0.2.5).
 2. Drag **Transcribator** to **Applications**.
 3. Open it; the app appears in the menu bar, not in the Dock.
 4. Open **Settings**, check the ChatGPT connection or save an OpenAI API key, and choose output folders.
